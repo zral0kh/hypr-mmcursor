@@ -1,0 +1,44 @@
+#cloud-config
+# Template. `make vm-seed` substitutes @SSHKEY@ and writes build/vm/seed.iso.
+# Do not put a real key in here — this file is committed.
+hostname: mmcursor-vm
+
+users:
+  - name: dev
+    # seat: aquamarine's DRM backend needs a seat to open the GPU.
+    # video/input: so Hyprland can reach /dev/dri and the evdev devices.
+    groups: [wheel, seat, video, input]
+    shell: /bin/bash
+    sudo: ["ALL=(ALL) NOPASSWD:ALL"]
+    lock_passwd: false
+    plain_text_passwd: dev
+    ssh_authorized_keys:
+      - @SSHKEY@
+
+# A password is set on purpose. Hyprland must be launched from the VM's own tty
+# for seatd to hand it a seat, so you need the VNC console, not just SSH.
+ssh_pwauth: true
+chpasswd:
+  list: |
+    root:root
+  expire: false
+
+packages:
+  - hyprland
+  - seatd
+  - base-devel    # gcc, make
+  - git
+  # Everything below was present only TRANSITIVELY on first run — binutils and
+  # wayland via hyprland's dependencies, python via cloud-init itself. All three
+  # are load-bearing, so they are named explicitly rather than left to luck.
+  - binutils      # `nm`: findFunctionsByName shells out to it, so hooks fail to
+                  # resolve without it. Also `addr2line`, for crash triage.
+  - wayland       # wayland-scanner + libwayland-client, for test/vpointer
+  - python        # test/vm/verify.sh uses it for float comparisons
+  - pkgconf       # pkg-config, for the plugin build flags
+
+runcmd:
+  # seatd rather than a full graphical logind session: fewer moving parts, and a
+  # seat is all the DRM backend actually needs.
+  - [ systemctl, enable, --now, seatd.service ]
+  - [ bash, -c, "echo 'VM READY' > /var/log/mmcursor-vm-ready" ]
