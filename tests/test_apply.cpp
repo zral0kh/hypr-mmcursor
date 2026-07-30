@@ -11,7 +11,7 @@
 //   * Third parties (dispatchers, games releasing pointer lock, tablets) warp it
 //     behind our back with no notification.
 //
-// The single most valuable thing asserted here is the one PLAN.md flagged as a
+// The single most valuable thing asserted here is the one ROADMAP.md flags as a
 // trap: that our own writes do NOT get mistaken for external moves. Get that
 // wrong and nothing crashes, nothing loops, and the mm accumulator quietly
 // round-trips through lossy logical space on the fast path — drift arriving from
@@ -181,7 +181,7 @@ int main() {
     section("our own writes are not mistaken for external moves");
     // -----------------------------------------------------------------------
     //
-    // THE trap from PLAN.md. Our write lands via the same path a third-party
+    // THE trap. Our own write lands via the same path a third-party
     // warp would, so a naive implementation reconciles against its own output on
     // every single event: mm -> logical -> mm, on the fast path, through the
     // lossy space. It does not crash and it does not loop; it just drifts.

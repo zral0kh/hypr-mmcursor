@@ -254,7 +254,7 @@ void hkPointerMove(void* thisptr, const Vector2D& deltaLogical) {
     // Resist the urge to inline "just this one condition" — that is how the
     // logic ended up untestable the first time.
     //
-    // Why a pull rather than the push PLAN.md originally described (a
+    // Why a pull rather than a push (a
     // reentrancy flag plus a hook on every absolute-motion path): m_pointerPos
     // is written in exactly three places in 0.56.0 —
     //     warpTo()        PointerManager.cpp:821

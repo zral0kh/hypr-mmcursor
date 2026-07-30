@@ -71,8 +71,14 @@ indirection a later refactor will helpfully "simplify" into a bug.
 
 The interposition point is one arrow: **delta → new global cursor position**.
 Everything downstream derives from global position and inherits the correction
-for free — cursor rendering, surface-local `wl_pointer.motion`, hit testing,
-focus. None of it needs to know millimetres exist.
+for free — surface-local `wl_pointer.motion`, hit testing, focus, drag tracking.
+None of it needs to know millimetres exist.
+
+One honest exception, since a global position is a single *point*: what inherits
+the correction is the hotspot. The cursor *bitmap* is drawn once per monitor it
+overlaps, each from that monitor's own still-logical origin, so while the image
+straddles a seam its two halves do not line up. Confirmed on hardware, cosmetic,
+and out of scope by construction — see "Known limits".
 
 **mm is the only accumulator.** Never round-trip mm → logical → mm on the fast
 path. Logical is lossy and the error compounds until the two spaces silently
@@ -131,9 +137,17 @@ tests/test_apply.cpp        15,628 checks — the hook's logic against a
 
 test/vm/run.sh               Arch VM: fetch, seed, boot, provision.
 test/vm/hyprland.conf        Reproduces this desk on two virtual heads.
+test/vm/restart-and-load.sh  Restart + load + triage a crash, inside the VM.
+test/vm/user-data.in         cloud-init template; `run.sh seed` fills it in.
 test/vm/verify.sh            12 assertions inside a running compositor.
 test/vpointer/               Feeds real relative motion via wlr-virtual-pointer.
 test/nested.conf             Alternative to the VM: a nested-session config.
+
+README.md                    This file — the design, and why it is shaped this way.
+ROADMAP.md                   What is left to do, plus the facts worth not
+                             rediscovering (hook site, the two glue bugs, why
+                             headless is impossible).
+CLAUDE.md                    Rules for agentic sessions on this repo.
 ```
 
 The split is the point. Everything that can be logically wrong lives outside
@@ -155,15 +169,23 @@ The core is written and tested — 76,272 checks, no compositor needed, mutation
 tested. `src/plugin.cpp` is written, builds clean, and every Hyprland touchpoint
 carries the source location that establishes it.
 
-**It runs.** It loads into a real Hyprland and passes 12 scripted assertions
-driven through the real relative-pointer path, in a VM (`make vm-up && make
-vm-verify`). The headline result: identical 47.05mm of physical travel moves the
-cursor 199 logical px on one panel and 170 on the other, and purely horizontal
-input produces zero physical vertical drift across the seam while logical y moves
-by the predicted 104.15px.
+**It runs.** In the test VM it passes 12 scripted assertions driven through the
+real relative-pointer path (`make vm-up && make vm-verify`). The headline result:
+identical 47.05mm of physical travel moves the cursor 199 logical px on one panel
+and 170 on the other, and purely horizontal input produces zero physical vertical
+drift across the seam while logical y moves by the predicted 104.15px.
 
-What is still untested is a pointer-locked game, tablet/touch, and the EDID read
-path on real hardware — see `PLAN.md` Phase 4.
+**And it works on the real desk.** Loaded on the DP-9/DP-10 hardware, ordinary
+movement, crossing between panels and hammering the outer boundaries all behave
+correctly. Edge hammering is the interesting one: it is where an mm accumulator
+that had drifted outside the clamped region would surface as hysteresis, and it
+doesn't. That run also exercises the EDID *read* path, which every VM test had
+bypassed — virtual outputs have no usable EDID, so all of them went through the
+`mmcursor-monitor` override branch instead.
+
+Not yet put under load — none of it known-broken, just unverified: pointer-locked
+games, tablet and touch, monitor hotplug and DPMS, and any scale other than 1. See
+`ROADMAP.md` item 1.
 
 ### The hook site
 
@@ -206,7 +228,7 @@ from inside `mouseMoveUnified`. No event carries relative motion.
 `Event::bus()` is the only working path for events.)
 
 Because the whole liability is concentrated in one four-line hook, that is also
-the strongest argument for upstreaming this instead — see the end of `PLAN.md`.
+the strongest argument for upstreaming this instead — see `ROADMAP.md` item 4.
 
 ## Config
 
@@ -368,6 +390,33 @@ found in a unit test cost nothing; the same bugs found by moving a mouse across
 a screen cost an afternoon.
 
 ## Known limits
+
+**The cursor *bitmap* straddling a seam still looks wrong, and cannot be fixed
+here.** Confirmed on real hardware: move the pointer so the cursor's body overlaps
+the seam while the hotspot is still on the first panel, and the two halves are
+visibly disjoint. As soon as the hotspot crosses, it snaps to correct.
+
+That is the design working, not failing. The interposition point is one arrow —
+delta → global cursor position — and a position is a single point, the hotspot.
+Everything downstream inherits the correction *for that point*. The bitmap,
+though, is drawn once per monitor it overlaps, and each monitor places it from the
+global position using its own scale and logical origin. The monitors are still
+edge-adjacent in *logical* space, so the half drawn on one panel and the half drawn
+on the other do not line up physically.
+
+This is the same class of artifact as a window straddling the seam rendering at two
+different scales, and it is pre-existing. Fixing it means changing the monitors'
+logical placement, which changes window layout, workspace geometry and hit testing
+along with it — i.e. the compositor-level feature discussed in `ROADMAP.md` item 4,
+not something a plugin at this interposition point should attempt. It is bounded
+(at most the cursor's size, only while straddling) and purely cosmetic: the hotspot,
+which is what actually clicks, is correct throughout.
+
+If it bothers you, `cursor:hotspot_padding` is worth an experiment — Hyprland's
+clamp tests containment against a *single* monitor rect, so a non-zero padding
+should keep the cursor away from seams entirely and suppress the straddle. Note the
+tradeoff is real and measured: it reintroduces up to that many pixels of dead travel
+at every edge, which is the next limit.
 
 **`cursor:hotspot_padding` must be 0**, which is its default. It holds the cursor
 N logical px inside the layout, while our mm clamp stops at the true panel edge.

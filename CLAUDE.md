@@ -1,7 +1,7 @@
 # CLAUDE.md
 
 Context for agentic sessions on this repo. Read `README.md` for the design and
-`PLAN.md` for the work queue.
+`ROADMAP.md` for what is left to do.
 
 ## What this is
 
@@ -24,8 +24,14 @@ load-bearing, not style.
 
 **The interposition point is exactly one arrow: delta → new global cursor
 position.** Nothing else. Everything downstream of global position inherits the
-correction for free: cursor rendering, surface-local motion, hit testing, focus.
+correction for free: surface-local motion, hit testing, focus, drag tracking.
 Do not touch any of it.
+
+The one thing that does NOT follow, because a position is a single point: the
+cursor bitmap straddling a seam, which each monitor draws from its own logical
+origin. Confirmed on hardware. It is cosmetic and fixing it would mean moving
+monitor placement into physical space — a compositor feature, not this plugin.
+Do not attempt it here.
 
 **mm is the only accumulator.** Never round-trip mm → logical → mm on the fast
 path. Logical is lossy; the error compounds until the two spaces silently
@@ -75,10 +81,15 @@ against the installed headers and the 0.56.0 sources with the establishing sourc
 location cited inline. The `TODO(verify)` markers are gone because the questions
 were answered, not because they were dropped.
 
-**It has been loaded into a real compositor and passes 12 in-compositor
-assertions** (`make vm-up && make vm-verify`). Still untested: pointer-locked
-games, tablet/touch, and the EDID read path on real hardware. See `PLAN.md`
-Phase 4.
+**It works.** It passes 12 in-compositor assertions in the test VM
+(`make vm-up && make vm-verify`), and it has been loaded on the real DP-9/DP-10
+desk, where ordinary movement, cross-monitor crossing and boundary hammering all
+behave correctly. That last one also exercises the EDID *read* path, which every
+VM test had bypassed via the override branch.
+
+Still unverified — not known-broken, just not yet under load: pointer-locked
+games, tablet/touch, hotplug/DPMS, and any scale other than 1. See `ROADMAP.md`
+item 1.
 
 Loading it the first time found two glue bugs that static reading had not: an ABI
 guard comparing a full ABI string against a bare commit hash (so it could never
