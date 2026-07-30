@@ -264,6 +264,40 @@ cursor position, hyprctl and the hook are all fully exercised, which is all the
 test needs. For working rendering, install `qemu-hw-display-virtio-vga-gl` and use
 `-display egl-headless`, which needs host GPU access.
 
+## `plugin =` does not expand `~`, and the error surfaces in the wrong place
+
+`handlePlugin` stores the declared path **verbatim** (`ConfigManager.cpp:1887-1895`)
+and `loadPluginInternal` hands it straight to `dlopen` (`PluginSystem.cpp:71-82`).
+Neither expands a tilde, so `plugin = ~/…/mmcursor.so` fails at *load* time with a
+notification while `hyprctl configerrors` stays **clean** — the config parsed fine,
+only the load failed. Hunting for a config error finds nothing.
+
+The asymmetry is what makes it a trap: `source =` in the same file *does* expand
+`~`, because it globs with `GLOB_TILDE` (`ConfigManager.cpp:1816`). Use absolute
+paths for `plugin =`.
+
+Related: Hyprland's double-load guard (`getPluginByPath` → "Cannot load a plugin
+twice!") compares **path strings**, so two spellings of the same file slip past it
+and a second `pluginInit` installs a **second hook** on `CPointerManager::move`,
+double-applying the correction. Use one canonical absolute path everywhere. A
+process-wide single-instance guard inside the plugin would close this off properly;
+it is not implemented yet.
+
+## Autoload is failure-resistant, but only up to init
+
+Three layers make autoloading defensible: `pluginInit` runs inside `setjmp` +
+try/catch and a fatal signal there is caught and the plugin unloaded
+(`PluginSystem.cpp:113-126`, observed working twice); a config-declared plugin that
+fails to load logs, notifies and returns without aborting startup
+(`PluginSystem.cpp:226-233`); and our own ABI guard refuses a mismatched build
+outright. So "Hyprland was updated and the `.so` is stale" degrades to *no plugin*,
+not *no desktop*.
+
+What is **not** covered: a crash in the hook during ordinary motion. `setjmp` only
+wraps init. Autoloaded, that means a session that dies on mouse movement at every
+login, recoverable only from a TTY. Hence: verify by hand first, autoload once it
+is boring.
+
 ## `cursor:hotspot_padding` must be 0
 
 Its default. It holds the cursor N logical px inside the layout while our mm clamp

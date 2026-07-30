@@ -140,11 +140,18 @@ time.
 ## Testing posture
 
 Never develop against the live session. Use the VM (`make vm-up`), or a nested
-Hyprland. Load manually with `hyprctl plugin load` — never autoload from config,
-because a crash-on-init means recovering from a TTY, and this plugin has already
-crashed a compositor on load once. Keep a keyboard-only escape route: you are
-hooking the input path, so the plausible failure mode is "compositor alive, cursor
-unusable".
+Hyprland. Load manually with `hyprctl plugin load` — do not autoload from config
+while iterating. Hyprland *does* catch a crash during plugin init (this plugin has
+already tripped that twice, and the compositor survived both), but it does not
+catch one in the hook afterwards, and an autoloaded plugin that dies on mouse
+movement means fixing it from a TTY at every login. Keep a keyboard-only escape
+route: the plausible failure mode is "compositor alive, cursor unusable".
+
+For a user's permanent setup, see "Loading it on startup" in `README.md`. Two
+things there are easy to get wrong: `plugin =` does **not** expand `~` (unlike
+`source =`) and the resulting error does not appear in `hyprctl configerrors`; and
+the double-load guard compares path strings, so two spellings of the same file
+install two hooks.
 
 When a plugin crash lands in `std::` internals, do not trust the crash report's
 symbol names — they are nearest-symbol guesses and will name unrelated Hyprland

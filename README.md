@@ -251,6 +251,106 @@ optional. Yours look plausible — 600×340 and 530×300 are sane for a 27" and 
 24" — but do not trust the field in general, and headless outputs always report
 `0x0`.
 
+## Loading it on startup
+
+Once you have verified it by hand, make it permanent with the `plugin` keyword in
+`~/.config/hypr/hyprland.conf` — on Omarchy, the "add any other personal Hyprland
+configuration below" section at the bottom is the right place, since everything
+above it is sourced from `~/.local/share/omarchy/` and must not be edited.
+
+```ini
+# mmcursor — cursor motion in physical mm across mismatched-density monitors
+plugin = /home/you/Projects/hypr-mmcursor/build/mmcursor.so
+```
+
+Not `exec-once` in `autostart.conf`. `plugin` is a distinct keyword handled by
+`handlePlugin`; `exec-once` runs a program and would do nothing here.
+
+### Use an absolute path — `plugin =` does not expand `~`
+
+This is the one that costs you an afternoon, because the failure is quiet and the
+error appears in the wrong place.
+
+Hyprland stores the declared path **verbatim** (`handlePlugin`,
+`ConfigManager.cpp:1887-1895`) and hands it straight to `dlopen`
+(`PluginSystem.cpp:71-82`). Neither expands a tilde. So `plugin = ~/Projects/...`
+fails at *load* time with a notification, while `hyprctl configerrors` stays
+**clean** — because the config parsed perfectly; only the load failed. If you go
+looking for a config error you will not find one.
+
+What makes it easy to trip over is the asymmetry inside the same file: `source =`
+*does* expand `~`, because it globs the path with `GLOB_TILDE`
+(`ConfigManager.cpp:1816`). `plugin =` does not touch the string at all.
+
+### Use the *same* path everywhere
+
+Hyprland refuses to load a plugin twice by path string — `getPluginByPath`, then
+`"Cannot load a plugin twice!"`. But that check compares **strings**, so two
+different spellings of the same file slip past it. A second `pluginInit` then
+installs a **second hook** on `CPointerManager::move`, and the mm correction gets
+applied twice.
+
+So pick one canonical absolute path and use it for the config line *and* for any
+manual `hyprctl plugin load`. If you have been testing by hand, unload first:
+
+```sh
+hyprctl plugin unload /home/you/Projects/hypr-mmcursor/build/mmcursor.so
+```
+
+### Why autoloading is safe here
+
+Autoloading an input-path plugin sounds reckless. It is defensible on 0.56 because
+there are two independent layers underneath it, plus one of our own:
+
+1. `pluginInit` runs inside `setjmp` + try/catch (`PluginSystem.cpp:113-126`).
+   A **fatal signal** during init is caught and the plugin unloaded. Observed
+   working twice while this plugin was being developed — both crashes left the
+   compositor running.
+2. A config-declared plugin that fails to load logs an error, raises a
+   notification, and returns (`PluginSystem.cpp:226-233`). Startup continues.
+3. Our own ABI guard refuses to load against a different Hyprland build at all.
+
+Together those make the recurring real-world case — Hyprland gets updated, the ABI
+string changes, the stale `.so` no longer matches — degrade to **"no plugin, plus a
+notification"** rather than "no desktop". That is the whole reason the ABI guard
+exists.
+
+**The residual risk, stated plainly:** the `setjmp` only wraps *init*. A crash in
+the hook during ordinary motion is **not** caught and would take the session down —
+and while autoloaded, on every login. Recovery is a TTY (`Ctrl+Alt+F3`) and
+commenting out the `plugin` line. That is why you load it by hand and use it for a
+while before putting it in the config, not the other way round.
+
+### Rebuild after every Hyprland update
+
+Hyprland's plugin API has no ABI stability, so an update means the plugin stops
+loading until rebuilt. Nothing breaks; it just silently stops working, which is
+worse in its own way. On Omarchy the idiomatic fix is a post-update hook — drop an
+executable file (no `.sample` suffix) in `~/.config/omarchy/hooks/post-update.d/`:
+
+```bash
+#!/bin/bash
+# Rebuild mmcursor after a Hyprland upgrade; without this the ABI guard will
+# correctly refuse to load it. Takes effect at the next login, which is right:
+# the rebuilt plugin matches the NEW Hyprland, not the one still running.
+cd /home/you/Projects/hypr-mmcursor || exit 0
+make plugin || notify-send -u critical "mmcursor" "Rebuild failed — plugin will not load"
+```
+
+`make plugin` runs `check-toolchain` first, so a compiler mismatch fails loudly
+here instead of crashing at load. If you also update with plain `pacman -Syu`, a
+`/etc/pacman.d/hooks/` hook on `Target = hyprland` catches every path, at the cost
+of needing root.
+
+After editing the config, validate:
+
+```sh
+hyprctl reload && hyprctl configerrors
+```
+
+Remember that a clean `configerrors` does **not** mean the plugin loaded — check
+`hyprctl plugin list` and `hyprctl mmcursor` for that.
+
 ## Dependencies
 
 Four separate sets, because they genuinely are separate — the whole point of the
@@ -378,8 +478,10 @@ need the `mmcursor-monitor` override path working first — which you want
 anyway.
 
 **Never autoload during development.** Load with `hyprctl plugin load
-/path/to/mmcursor.so`. A crash-on-init plugin listed in your config means
-Hyprland dies at startup and you are recovering from a TTY.
+/path/to/mmcursor.so`. Hyprland does catch a crash during plugin init (see
+"Loading it on startup"), but it does *not* catch one in the hook afterwards — and
+a plugin listed in your config that dies on mouse movement means fixing it from a
+TTY, every login. Autoload once it is boring, not while you are changing it.
 
 **Keep an escape hatch.** Ctrl+Alt+F3, or SSH in from another machine. You are
 hooking the *input* path, so the plausible failure mode is "compositor alive,
