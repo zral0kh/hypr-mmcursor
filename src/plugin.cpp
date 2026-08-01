@@ -29,6 +29,7 @@
 #include <hyprland/src/output/Monitor.hpp>
 
 #include <format>
+#include <optional>
 #include <string_view>
 #include <type_traits>
 #include <string>
@@ -45,7 +46,10 @@ pcs::CursorState g_cursor;
 bool             g_enabled     = true;
 double           g_sensitivity = 1.0;
 double           g_gapMM       = 0.0;
-pcs::VAlign      g_align       = pcs::VAlign::Center;
+pcs::Align       g_align       = pcs::Align::Derive;
+
+// How the last rebuild placed each monitor, for `hyprctl mmcursor`.
+pcs::BuildDiagnostics g_diag;
 
 // The logical position we last observed immediately after our own warp.
 //
@@ -53,14 +57,49 @@ pcs::VAlign      g_align       = pcs::VAlign::Center;
 // not a prediction — never assign a value here that we merely *asked* for.
 Vector2D g_lastSeen = {0, 0};
 
-// User-supplied physical overrides, keyed by monitor name. Populated by the
-// `mmcursor-monitor` config keyword. Everything else comes from EDID.
+// -------------------------------------------------------------------------
+// Config keyword state
+// -------------------------------------------------------------------------
+//
+// Everything below is repopulated from scratch on every config parse. Hyprlang
+// calls our keyword handlers once per matching line, and it has no notion of
+// "these lines went away", so holding state across a reload would mean deleting
+// a line leaves its effect in place until the compositor restarts. The
+// config.preReload listener clears all four; see PLUGIN_INIT.
+
+// Physical size overrides, keyed by monitor name. `mmcursor-monitor`.
+// Everything else comes from EDID.
 struct Override {
     double mmWidth  = 0.0;
     double mmHeight = 0.0;
-    double offsetMM = 0.0;
+    double offsetMM = 0.0; // legacy 4th field, folded into the y offset
 };
 std::unordered_map<std::string, Override> g_overrides;
+
+// `mmcursor-place`  — absolute mm origins and explicit anchor relations.
+std::unordered_map<std::string, pcs::PlacementSpec> g_placements;
+
+// `mmcursor-offset` — 2D nudges applied after placement.
+std::unordered_map<std::string, pcs::Vec2> g_offsets;
+
+// `mmcursor-gap`    — per-seam bezels, overriding the global gap_mm.
+std::vector<pcs::SeamGap> g_seamGaps;
+
+// Live overrides from `hyprctl mmcursor place|offset`, which deliberately do
+// NOT persist: they are cleared by the next config parse, so hyprland.conf
+// stays the one source of truth and a tuning session cannot silently become
+// your configuration.
+std::unordered_map<std::string, pcs::Vec2> g_liveOrigins;
+std::unordered_map<std::string, pcs::Vec2> g_liveOffsets;
+
+void clearConfigState() {
+    g_overrides.clear();
+    g_placements.clear();
+    g_offsets.clear();
+    g_seamGaps.clear();
+    g_liveOrigins.clear();
+    g_liveOffsets.clear();
+}
 
 CFunctionHook* g_moveHook = nullptr;
 
@@ -70,6 +109,7 @@ struct {
     CHyprSignalListener layoutChanged;
     CHyprSignalListener monitorAdded;
     CHyprSignalListener monitorRemoved;
+    CHyprSignalListener configPreReload;
     CHyprSignalListener configReloaded;
 } g_listeners;
 
@@ -123,7 +163,20 @@ void rebuildLayout() {
                 d.overrideMMWidth = it->second.mmWidth;
             if (it->second.mmHeight > 0.0)
                 d.overrideMMHeight = it->second.mmHeight;
-            d.offsetMM = it->second.offsetMM;
+            d.offsetMM.y = it->second.offsetMM;
+        }
+
+        if (auto it = g_offsets.find(d.name); it != g_offsets.end())
+            d.offsetMM = it->second;
+        if (auto it = g_liveOffsets.find(d.name); it != g_liveOffsets.end())
+            d.offsetMM = it->second;
+
+        if (auto it = g_placements.find(d.name); it != g_placements.end())
+            d.placement = it->second;
+        if (auto it = g_liveOrigins.find(d.name); it != g_liveOrigins.end()) {
+            pcs::PlacementSpec spec;
+            spec.absoluteMM = it->second;
+            d.placement     = spec;
         }
 
         // A panel that reports no physical size and has no override cannot
@@ -142,10 +195,21 @@ void rebuildLayout() {
     }
 
     pcs::BuildOptions opts;
-    opts.align = g_align;
-    opts.gapMM = g_gapMM;
+    opts.align    = g_align;
+    opts.gapMM    = g_gapMM;
+    opts.seamGaps = g_seamGaps;
 
-    g_layout = pcs::buildLayout(std::move(descs), opts);
+    g_diag   = pcs::BuildDiagnostics{};
+    g_layout = pcs::buildLayout(std::move(descs), opts, &g_diag);
+
+    // Best-effort placement is still placement, but it is a guess and the user
+    // is the only one who can correct it. Cap the toasts — the full list is
+    // always in `hyprctl mmcursor`.
+    for (std::size_t i = 0; i < g_diag.warnings.size() && i < 3; ++i)
+        HyprlandAPI::addNotification(PHANDLE, "[mmcursor] " + g_diag.warnings[i], CHyprColor{1.0F, 0.7F, 0.2F, 1.0F}, 6000);
+    if (g_diag.warnings.size() > 3)
+        HyprlandAPI::addNotification(PHANDLE, std::format("[mmcursor] {} more placement warnings; see `hyprctl mmcursor`.", g_diag.warnings.size() - 3),
+                                     CHyprColor{1.0F, 0.7F, 0.2F, 1.0F}, 6000);
 
     // Overlapping mm rects mean two panels claim the same desk space. Which one
     // a point belongs to then comes down to declaration order, and the cursor
@@ -292,20 +356,33 @@ void hkPointerMove(void* thisptr, const Vector2D& deltaLogical) {
 //           enabled     = true
 //           sensitivity = 1.0
 //           gap_mm      = 0.0
-//           align       = center      # center | top | bottom
 //
-//           # name, physical width mm, physical height mm, vertical offset mm
+//           # derive (default) reads each seam's alignment out of the layout
+//           # Hyprland actually has active. top/center/bottom force every seam
+//           # instead, for when that layout is itself wrong.
+//           align       = derive
+//
+//           # name, physical width mm, physical height mm [, vertical offset mm]
 //           # width/height are in the panel's NATIVE orientation; rotation is
 //           # applied for you. 0 means "trust EDID".
-//           mmcursor-monitor = DP-9,  600, 340, 0
-//           mmcursor-monitor = DP-10, 530, 300, 0
+//           mmcursor-monitor = DP-9,  600, 340
+//           mmcursor-monitor = DP-10, 530, 300
+//
+//           # Placement is derived from the active layout, so none of the rest
+//           # is normally needed. Each one overrides that derivation.
+//           mmcursor-place  = DP-10, at, 620, -95      # absolute mm origin
+//           mmcursor-place  = DP-11, below, DP-9, left, 12
+//           mmcursor-gap    = DP-9, DP-10, 22          # this seam's bezel, mm
+//           mmcursor-offset = DP-10, 0, -4             # 2D nudge, mm
 //       }
 //   }
+//
+// None of this requires rebuilding the plugin: Hyprland watches hyprland.conf
+// itself, and the config.reloaded listener below re-reads and rebuilds. Saving
+// the file is enough.
 
-Hyprlang::CParseResult onMonitorKeyword(const char* /*command*/, const char* value) {
-    Hyprlang::CParseResult result;
-
-    std::string              v{value};
+std::vector<std::string> splitFields(const char* value) {
+    std::string              v{value ? value : ""};
     std::vector<std::string> parts;
     size_t                   pos = 0;
     while (true) {
@@ -318,6 +395,40 @@ Hyprlang::CParseResult onMonitorKeyword(const char* /*command*/, const char* val
             break;
         pos = comma + 1;
     }
+    return parts;
+}
+
+// Alignment words. top/bottom read naturally at a horizontal seam and
+// left/right at a vertical one; both spellings map to the same axis-agnostic
+// Start/End, so either is accepted wherever an alignment is expected.
+std::optional<pcs::Align> parseAlign(const std::string& s) {
+    if (s == "derive")
+        return pcs::Align::Derive;
+    if (s == "top" || s == "left")
+        return pcs::Align::Start;
+    if (s == "center" || s == "centre")
+        return pcs::Align::Center;
+    if (s == "bottom" || s == "right")
+        return pcs::Align::End;
+    return std::nullopt;
+}
+
+std::optional<pcs::Edge> parseEdge(const std::string& s) {
+    if (s == "right-of")
+        return pcs::Edge::RightOf;
+    if (s == "left-of")
+        return pcs::Edge::LeftOf;
+    if (s == "above")
+        return pcs::Edge::Above;
+    if (s == "below")
+        return pcs::Edge::Below;
+    return std::nullopt;
+}
+
+Hyprlang::CParseResult onMonitorKeyword(const char* /*command*/, const char* value) {
+    Hyprlang::CParseResult result;
+
+    const std::vector<std::string> parts = splitFields(value);
 
     if (parts.size() < 3) {
         result.setError("mmcursor-monitor needs: name, mm_width, mm_height [, offset_mm]");
@@ -336,6 +447,120 @@ Hyprlang::CParseResult onMonitorKeyword(const char* /*command*/, const char* val
     }
 
     g_overrides[parts[0]] = o;
+    return result;
+}
+
+//   mmcursor-place = NAME, at, X_MM, Y_MM
+//   mmcursor-place = NAME, right-of|left-of|above|below, ANCHOR [, align] [, offset_mm]
+Hyprlang::CParseResult onPlaceKeyword(const char* /*command*/, const char* value) {
+    Hyprlang::CParseResult result;
+
+    const std::vector<std::string> parts = splitFields(value);
+    if (parts.size() < 3) {
+        result.setError("mmcursor-place needs: NAME, at, x_mm, y_mm  |  NAME, right-of|left-of|above|below, ANCHOR [, align] [, offset_mm]");
+        return result;
+    }
+
+    pcs::PlacementSpec spec;
+
+    if (parts[1] == "at") {
+        if (parts.size() < 4) {
+            result.setError("mmcursor-place ... at needs both x_mm and y_mm");
+            return result;
+        }
+        try {
+            spec.absoluteMM = pcs::Vec2{std::stod(parts[2]), std::stod(parts[3])};
+        } catch (...) {
+            result.setError("mmcursor-place: could not parse the mm origin");
+            return result;
+        }
+    } else {
+        const auto EDGE = parseEdge(parts[1]);
+        if (!EDGE) {
+            result.setError("mmcursor-place: expected `at`, `right-of`, `left-of`, `above` or `below`");
+            return result;
+        }
+        if (parts[2].empty()) {
+            result.setError("mmcursor-place: a relation needs an anchor monitor");
+            return result;
+        }
+        spec.edge   = *EDGE;
+        spec.anchor = parts[2];
+
+        if (parts.size() >= 4 && !parts[3].empty()) {
+            const auto ALIGN = parseAlign(parts[3]);
+            if (!ALIGN) {
+                result.setError("mmcursor-place: alignment must be derive, top/left, center or bottom/right");
+                return result;
+            }
+            spec.align = *ALIGN;
+        }
+        if (parts.size() >= 5 && !parts[4].empty()) {
+            try {
+                spec.offsetMM = std::stod(parts[4]);
+            } catch (...) {
+                result.setError("mmcursor-place: could not parse the offset");
+                return result;
+            }
+        }
+    }
+
+    // Placing a monitor on itself would make it its own anchor and it would
+    // never be placeable — caught here rather than as a mystery fallback later.
+    if (spec.anchor == parts[0]) {
+        result.setError("mmcursor-place: a monitor cannot be its own anchor");
+        return result;
+    }
+
+    g_placements[parts[0]] = spec;
+    return result;
+}
+
+//   mmcursor-gap = A, B, MM
+Hyprlang::CParseResult onGapKeyword(const char* /*command*/, const char* value) {
+    Hyprlang::CParseResult result;
+
+    const std::vector<std::string> parts = splitFields(value);
+    if (parts.size() < 3) {
+        result.setError("mmcursor-gap needs: monitor_a, monitor_b, mm");
+        return result;
+    }
+
+    pcs::SeamGap g;
+    g.a = parts[0];
+    g.b = parts[1];
+    try {
+        g.mm = std::stod(parts[2]);
+    } catch (...) {
+        result.setError("mmcursor-gap: could not parse a number");
+        return result;
+    }
+    if (g.mm < 0.0) {
+        result.setError("mmcursor-gap: a bezel cannot be negative");
+        return result;
+    }
+
+    std::erase_if(g_seamGaps, [&](const pcs::SeamGap& e) { return (e.a == g.a && e.b == g.b) || (e.a == g.b && e.b == g.a); });
+    g_seamGaps.push_back(g);
+    return result;
+}
+
+//   mmcursor-offset = NAME, DX_MM, DY_MM
+Hyprlang::CParseResult onOffsetKeyword(const char* /*command*/, const char* value) {
+    Hyprlang::CParseResult result;
+
+    const std::vector<std::string> parts = splitFields(value);
+    if (parts.size() < 3) {
+        result.setError("mmcursor-offset needs: name, dx_mm, dy_mm");
+        return result;
+    }
+
+    try {
+        g_offsets[parts[0]] = pcs::Vec2{std::stod(parts[1]), std::stod(parts[2])};
+    } catch (...) {
+        result.setError("mmcursor-offset: could not parse a number");
+        return result;
+    }
     return result;
 }
 
@@ -408,15 +633,8 @@ void reloadConfigValues() {
     }
 
     Hyprlang::STRING align = nullptr;
-    if (readConfig("plugin:mmcursor:align", align) && align) {
-        const std::string A{align};
-        if (A == "top")
-            g_align = pcs::VAlign::Top;
-        else if (A == "bottom")
-            g_align = pcs::VAlign::Bottom;
-        else
-            g_align = pcs::VAlign::Center;
-    }
+    if (readConfig("plugin:mmcursor:align", align) && align)
+        g_align = parseAlign(std::string{align}).value_or(pcs::Align::Derive);
 }
 
 // -------------------------------------------------------------------------
@@ -428,13 +646,17 @@ void reloadConfigValues() {
 // A hyprctl command rather than a dispatcher, because a dispatcher can only
 // return success/error (SDispatchResult, SharedDefs.hpp:52) whereas this hands
 // text back to the terminal.
-std::string debugDump(eHyprCtlOutputFormat /*format*/, std::string /*args*/) {
+std::string debugDump() {
     std::string out;
 
     out += std::format("mmcursor: {}\n", g_enabled ? "enabled" : "disabled");
     out += std::format("mm per input unit: {:.6f}  (sensitivity {:.3f})\n", g_cursor.mmPerUnit(), g_sensitivity);
-    out += std::format("gap: {:.2f} mm    align: {}\n", g_gapMM,
-                       g_align == pcs::VAlign::Top ? "top" : (g_align == pcs::VAlign::Bottom ? "bottom" : "center"));
+    const char* ALIGN_NAME = g_align == pcs::Align::Start ? "top/left" : (g_align == pcs::Align::End ? "bottom/right" : (g_align == pcs::Align::Center ? "center" : "derive"));
+    out += std::format("gap: {:.2f} mm    align: {}\n", g_gapMM, ALIGN_NAME);
+    if (!g_seamGaps.empty()) {
+        for (const auto& g : g_seamGaps)
+            out += std::format("  seam {} <-> {}: {:.2f} mm\n", g.a, g.b, g.mm);
+    }
 
     if (g_layout.empty()) {
         out += "\nlayout: EMPTY — plugin is inert.\n";
@@ -449,11 +671,88 @@ std::string debugDump(eHyprCtlOutputFormat /*format*/, std::string /*args*/) {
 
     out += "\nmonitors:\n";
     for (const auto& m : g_layout.monitors()) {
-        out += std::format("  {:<10} mm [{:7.2f} {:7.2f}  {:7.2f}x{:7.2f}]  logical [{:6.0f} {:6.0f}  {:5.0f}x{:5.0f}]  {:.4f} x {:.4f} px/mm\n", m.name, m.mm.x, m.mm.y,
+        out += std::format("  {:<10} mm [{:7.2f} {:7.2f}  {:7.2f}x{:7.2f}]  logical [{:6.0f} {:6.0f}  {:5.0f}x{:5.0f}]  {:.4f} x {:.4f} px/mm", m.name, m.mm.x, m.mm.y,
                            m.mm.w, m.mm.h, m.logical.x, m.logical.y, m.logical.w, m.logical.h, m.pxPerMMx(), m.pxPerMMy());
+
+        // How this monitor got where it is. Without this a wrong layout is a
+        // theory you form by moving the mouse around; with it, it is a line.
+        for (const auto& p : g_diag.placements) {
+            if (p.name != m.name)
+                continue;
+            out += "  <- " + p.how;
+            if (!p.anchor.empty())
+                out += " " + p.anchor;
+            if (p.residualMM.x != 0.0 || p.residualMM.y != 0.0)
+                out += std::format(" residual {:+.2f},{:+.2f}mm", p.residualMM.x, p.residualMM.y);
+            break;
+        }
+        out += "\n";
     }
 
+    if (!g_diag.warnings.empty()) {
+        out += "\nwarnings:\n";
+        for (const auto& w : g_diag.warnings)
+            out += "  " + w + "\n";
+    }
+
+    if (!g_liveOrigins.empty() || !g_liveOffsets.empty())
+        out += "\nlive overrides are active (not persisted; the next config reload drops them)\n";
+
     return out;
+}
+
+// `hyprctl mmcursor [reload | place NAME X Y | offset NAME DX DY]`
+//
+// reload exists because `hyprctl keyword` applies a single value without
+// re-parsing the file, and so may never emit config.reloaded. place/offset
+// exist because positioning a monitor is a tape-measure job: nudge, look,
+// nudge. They deliberately do not persist — hyprland.conf stays the source of
+// truth and the next reload drops them.
+std::string ctlCommand(eHyprCtlOutputFormat /*format*/, std::string args) {
+    // With exact=false the dispatcher may hand us the whole request, command
+    // word and all. Drop a leading "mmcursor" so both forms parse the same.
+    std::vector<std::string> tok;
+    for (size_t i = 0; i < args.size();) {
+        const size_t b = args.find_first_not_of(" \t", i);
+        if (b == std::string::npos)
+            break;
+        const size_t e = args.find_first_of(" \t", b);
+        tok.push_back(args.substr(b, e == std::string::npos ? std::string::npos : e - b));
+        i = e == std::string::npos ? args.size() : e;
+    }
+    if (!tok.empty() && tok.front() == "mmcursor")
+        tok.erase(tok.begin());
+
+    if (tok.empty())
+        return debugDump();
+
+    if (tok[0] == "reload") {
+        reloadConfigValues();
+        rebuildLayout();
+        return "mmcursor: config re-read and layout rebuilt\n";
+    }
+
+    const bool isPlace  = tok[0] == "place";
+    const bool isOffset = tok[0] == "offset";
+    if (isPlace || isOffset) {
+        if (tok.size() < 4)
+            return std::format("usage: hyprctl mmcursor {} NAME X_MM Y_MM\n", tok[0]);
+        double x = 0.0, y = 0.0;
+        try {
+            x = std::stod(tok[2]);
+            y = std::stod(tok[3]);
+        } catch (...) { return "mmcursor: could not parse a number\n"; }
+
+        if (isPlace)
+            g_liveOrigins[tok[1]] = pcs::Vec2{x, y};
+        else
+            g_liveOffsets[tok[1]] = pcs::Vec2{x, y};
+
+        rebuildLayout();
+        return debugDump();
+    }
+
+    return "usage: hyprctl mmcursor [reload | place NAME X_MM Y_MM | offset NAME DX_MM DY_MM]\n";
 }
 
 SP<SHyprCtlCommand> g_ctlCommand;
@@ -509,8 +808,11 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
     HyprlandAPI::addConfigValue(PHANDLE, "plugin:mmcursor:enabled", Hyprlang::INT{1});
     HyprlandAPI::addConfigValue(PHANDLE, "plugin:mmcursor:sensitivity", Hyprlang::FLOAT{1.0F});
     HyprlandAPI::addConfigValue(PHANDLE, "plugin:mmcursor:gap_mm", Hyprlang::FLOAT{0.0F});
-    HyprlandAPI::addConfigValue(PHANDLE, "plugin:mmcursor:align", Hyprlang::STRING{"center"});
+    HyprlandAPI::addConfigValue(PHANDLE, "plugin:mmcursor:align", Hyprlang::STRING{"derive"});
     HyprlandAPI::addConfigKeyword(PHANDLE, "mmcursor-monitor", onMonitorKeyword, Hyprlang::SHandlerOptions{});
+    HyprlandAPI::addConfigKeyword(PHANDLE, "mmcursor-place", onPlaceKeyword, Hyprlang::SHandlerOptions{});
+    HyprlandAPI::addConfigKeyword(PHANDLE, "mmcursor-gap", onGapKeyword, Hyprlang::SHandlerOptions{});
+    HyprlandAPI::addConfigKeyword(PHANDLE, "mmcursor-offset", onOffsetKeyword, Hyprlang::SHandlerOptions{});
 
     // Both the value and keyword APIs bail out unless the config is the legacy
     // hyprland.conf kind (plugins/PluginAPI.cpp:180, :199), and getConfigValue
@@ -532,12 +834,21 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
     g_listeners.layoutChanged  = Event::bus()->m_events.monitor.layoutChanged.listen([] { rebuildLayout(); });
     g_listeners.monitorAdded   = Event::bus()->m_events.monitor.added.listen([](PHLMONITOR) { rebuildLayout(); });
     g_listeners.monitorRemoved = Event::bus()->m_events.monitor.removed.listen([](PHLMONITOR) { rebuildLayout(); });
+    // Hyprlang calls a keyword handler once per matching line and has no way to
+    // tell us a line was deleted, so accumulated keyword state has to be thrown
+    // away before each parse — otherwise removing an `mmcursor-place` line
+    // leaves it in force until the compositor restarts. preReload is the only
+    // hook that fires early enough to do that.
+    g_listeners.configPreReload = Event::bus()->m_events.config.preReload.listen([] { clearConfigState(); });
+
     g_listeners.configReloaded = Event::bus()->m_events.config.reloaded.listen([] {
         reloadConfigValues();
         rebuildLayout();
     });
 
-    g_ctlCommand = HyprlandAPI::registerHyprCtlCommand(PHANDLE, SHyprCtlCommand{"mmcursor", true, debugDump});
+    // exact=false so `hyprctl mmcursor reload` and friends reach us rather than
+    // failing to match the bare command name.
+    g_ctlCommand = HyprlandAPI::registerHyprCtlCommand(PHANDLE, SHyprCtlCommand{"mmcursor", false, ctlCommand});
 
     // The function hook. x86_64 only, and the most fragile thing here by a wide
     // margin — see the block comment above hkPointerMove for why there is no
@@ -589,4 +900,6 @@ APICALL EXPORT void PLUGIN_EXIT() {
     g_cursor.setLayout(nullptr);
     g_cursor.invalidate();
     g_layout = pcs::Layout{};
+    g_diag   = pcs::BuildDiagnostics{};
+    clearConfigState();
 }

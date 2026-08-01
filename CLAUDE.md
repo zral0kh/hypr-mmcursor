@@ -72,7 +72,7 @@ Do not "simplify" by pulling compositor types into the core.
 Verified against **Hyprland 0.56.0** (commit `36b2e0cf`, the Arch/Omarchy
 package), cross-checked against 0.56.1. Both compile and pass.
 
-Core: written, tested, **76,272 checks** green under ASan+UBSan, clean at
+Core: written, tested, **76,680 checks** green under ASan+UBSan, clean at
 `-Wconversion`, and mutation tested — deliberately broken cores were checked to
 confirm the suites can actually fail.
 
@@ -114,13 +114,13 @@ fine; spawning a second compositor was not welcome unannounced.
 ## Commands
 
 ```sh
-make test             # compiler only, no Hyprland, ASan+UBSan, 3 suites
+make test             # compiler only, no Hyprland, ASan+UBSan, 4 suites
 make plugin           # needs Hyprland headers; checks toolchain first
 make check-toolchain  # compares your compiler against Hyprland's
 make load / unload    # into a RUNNING compositor — VM or nested only, never live
 
 make vm-up            # fetch + boot + provision the Arch test VM (needs qemu)
-make vm-verify        # push tree, build inside, load plugin, run 12 assertions
+make vm-verify        # push tree, build inside, load plugin, run 88 assertions
 make vm-ssh / vm-down
 ```
 

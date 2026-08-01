@@ -12,16 +12,22 @@ CXXFLAGS_COMMON := -std=c++23 -Wall -Wextra -Wconversion -O2
 # ---------------------------------------------------------------------------
 TEST_CXXFLAGS := $(CXXFLAGS_COMMON) -g -fsanitize=address,undefined
 
-# test_geometry — the pieces compute what they claim.
-# test_model    — the properties the plugin exists to provide, plus a
-#                 differential comparison against a stock-Hyprland reference
-#                 model. Run both; they fail for different reasons.
+# test_geometry  — the pieces compute what they claim.
+# test_model     — the properties the plugin exists to provide, plus a
+#                  differential comparison against a stock-Hyprland reference
+#                  model.
+# test_placement — the desk layout derived from the active Hyprland
+#                  arrangement, and every override of it.
+# test_apply     — the hook's decision logic against a simulated compositor.
+# Run all four; they fail for different reasons.
 test:
-	$(CXX) $(TEST_CXXFLAGS) -o build/test_geometry tests/test_geometry.cpp $(CORE_SRC)
-	$(CXX) $(TEST_CXXFLAGS) -o build/test_model    tests/test_model.cpp    $(CORE_SRC)
-	$(CXX) $(TEST_CXXFLAGS) -o build/test_apply    tests/test_apply.cpp    $(CORE_SRC)
+	$(CXX) $(TEST_CXXFLAGS) -o build/test_geometry  tests/test_geometry.cpp  $(CORE_SRC)
+	$(CXX) $(TEST_CXXFLAGS) -o build/test_model     tests/test_model.cpp     $(CORE_SRC)
+	$(CXX) $(TEST_CXXFLAGS) -o build/test_placement tests/test_placement.cpp $(CORE_SRC)
+	$(CXX) $(TEST_CXXFLAGS) -o build/test_apply     tests/test_apply.cpp     $(CORE_SRC)
 	./build/test_geometry
 	./build/test_model
+	./build/test_placement
 	./build/test_apply
 
 # ---------------------------------------------------------------------------
@@ -77,11 +83,18 @@ vm-up:
 
 # Push the tree in, build in there, load, and assert. `vm-verify` is the target
 # that turns "does the seam feel right" into pass/fail.
+#
+# verify.sh          the cursor behaves correctly on one desk
+# verify-placement.sh the desk itself is derived correctly from whatever
+#                    arrangement Hyprland has active, plus every override and
+#                    edge case. It rewrites hyprland.conf repeatedly and
+#                    restores it on exit.
 vm-verify:
 	tar cf - src tests Makefile test | ./test/vm/run.sh ssh 'rm -rf ~/mmcursor && mkdir -p ~/mmcursor && cd ~/mmcursor && tar xf -'
 	./test/vm/run.sh ssh 'cd ~/mmcursor && make plugin && make -C test/vpointer'
 	./test/vm/run.sh ssh 'cd ~/mmcursor && ./test/vm/restart-and-load.sh'
 	./test/vm/run.sh ssh 'cd ~/mmcursor && ./test/vm/verify.sh'
+	./test/vm/run.sh ssh 'cd ~/mmcursor && ./test/vm/verify-placement.sh'
 
 vm-ssh:
 	./test/vm/run.sh ssh

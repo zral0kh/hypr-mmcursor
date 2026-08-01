@@ -14,16 +14,23 @@ and cross-checked against **0.56.1**. Both compile and pass.
 ## Where this stands
 
 **The behavioural core is done.** `geometry`, `layout_build`, `cursor_state`,
-`apply` — zero Hyprland dependencies, **76,272 checks** under ASan+UBSan, clean at
+`apply` — zero Hyprland dependencies, **76,680 checks** under ASan+UBSan, clean at
 `-Wconversion`, and mutation tested (deliberately broken cores were checked to
 confirm the suites can actually fail). `make test` needs nothing but a compiler.
 
-**The plugin works in a real compositor.** It passes **12 scripted in-compositor
+**The plugin works in a real compositor.** It passes **88 scripted in-compositor
 assertions** in the test VM (`make vm-up && make vm-verify`), driven through the
 real relative-pointer path. The headline result, measured rather than argued:
 identical 47.05mm of physical travel moves the cursor **199 logical px on one panel
 and 170 on the other**, and purely horizontal input produces **zero** physical
 vertical drift across the seam while logical y moves by the predicted 104.15px.
+
+Those assertions span more than one desk. `verify-placement.sh` rewrites
+`hyprland.conf` and reloads for each of: centred, top- and bottom-aligned pairs; a
+deliberate logical gap; a vertical stack crossed both ways; a three-monitor L on a
+headless output; a mirrored monitor; a panel at scale 2; every config override;
+deleting a config line and confirming the effect goes with it; the `hyprctl`
+subcommands; and the two refusals.
 
 **It works on the real desk.** Loaded on the DP-9/DP-10 hardware it behaves
 correctly for ordinary cursor movement, crossing between the two panels, and
@@ -66,11 +73,17 @@ defect — it is the list of things that have not been put under load yet.
       `warpAbsolute` and is only picked up by the lazy reconcile.
 - [ ] **Monitor hotplug and DPMS.** `rebuildLayout()` runs on
       `monitor.layoutChanged`/`added`/`removed` and re-adopts the compositor's
-      cursor, but only the VM's synthetic add/remove has been tested — not a real
-      cable pull or a display waking up.
-- [ ] **A scale other than 1.** Both panels are at scale 1 today. `m_size` is
-      already scaled so the mathematics should be untouched, which is exactly the
-      kind of "should" worth testing.
+      cursor. Synthetic add/remove of a headless output is now covered in the VM,
+      including that a sizeless output disables the plugin loudly and that
+      removing it restores the previous layout — but not a real cable pull or a
+      display waking up.
+- [ ] **A scale other than 1 on real hardware.** Covered in the VM now (a panel at
+      scale 2 beside one at scale 1, asserting equal physical travel across the
+      seam) and in `test_placement.cpp` and `test_model.cpp`. `m_size` arrives
+      already divided by the scale, so a scale mismatch is just another density
+      mismatch — but nothing has run at a non-integer scale on real glass, where
+      `m_size = (transformedSize / scale).round()` costs up to half a pixel of
+      derived density.
 
 Safety, whenever loading into a live session: never autoload from config, keep a
 keyboard-only escape route, and have the unload command typed but not entered
@@ -86,36 +99,39 @@ hyprctl plugin unload $PWD/build/mmcursor.so
 
 ---
 
-## 2. Arbitrary monitor placement
+## 2. Arbitrary monitor placement — **done**
 
-Today the builder makes a single horizontal row aligned on one horizon. Real desks
-are not that tidy.
+The row builder is gone. Placement is now derived from the arrangement Hyprland
+has active, by reading the *relation* each seam states rather than converting its
+pixel offset, and any part of it can be overridden explicitly. See "Where the desk
+layout comes from" in `README.md`.
 
-- [ ] **Test the vertical offset that already exists.** `mmcursor-monitor = NAME,
-      w_mm, h_mm, offset_mm` — the fourth field — is parsed and applied
-      (`layout_build.cpp:54`), and it has **no test coverage at all**. It is
-      implemented, not verified. Fix that before building anything on top of it.
-- [ ] **Expose `explicitMMOrigin` in config.** The core already supports full 2D
-      placement: `MonitorDesc::explicitMMOrigin` is honoured by `buildLayout`, such
-      monitors are excluded from the row, and `firstMMOverlap()` already guards the
-      mistake it invites. Only the config parsing is missing. Something like:
+- [x] **Test the vertical offset that already exists.** Now 2D (`Vec2 offsetMM`),
+      exposed as `mmcursor-offset`, and covered in `tests/test_placement.cpp` and
+      in the VM.
+- [x] **Expose explicit placement in config.** `mmcursor-place` takes either
+      `NAME, at, x_mm, y_mm` or
+      `NAME, right-of|left-of|above|below, ANCHOR [, align] [, offset_mm]`.
+- [x] **Decide what happens when placement is partial.** Absolute placements are
+      roots; relations are forced edges; everything else attaches by its cheapest
+      logical adjacency. A monitor that states a relation waits for its anchor
+      rather than being attached elsewhere, and the root is preferentially chosen
+      from monitors that stated nothing, so the one instruction a user gave is not
+      the one thrown away. Overlap is still a hard refusal.
+- [x] **Per-seam gaps.** `mmcursor-gap = A, B, MM`, unordered.
+- [x] **Vertical stacking**, L-shapes and grids, via a spanning tree over logical
+      adjacency instead of a row.
 
-      ```
-      mmcursor-place = DP-10, 620, -95      # mm origin, absolute on the desk
-      ```
+What is left here is smaller:
 
-- [ ] **Decide what happens when placement is partial.** One monitor placed
-      explicitly and two left to the row builder is ambiguous. Simplest honest
-      rule: explicit monitors are anchors, the row is built around them, and any
-      overlap is a config error — which `firstMMOverlap()` already reports.
-- [ ] **Per-seam gaps** rather than one global `gap_mm`. Bezels differ between
-      pairs, and a single value is a compromise.
-- [ ] **Vertical stacking**, which the row builder cannot express at all. This is
-      the case `explicitMMOrigin` exists for, and the point at which "row builder
-      plus escape hatch" should probably become one general placement pass.
-
-Keep all of this in the pure core. Placement is geometry, and geometry is the part
-that is testable without a compositor.
+- [ ] **Rotation on the desk.** A panel physically rotated in a way `transform`
+      does not describe (a monitor tilted 15°, a portrait panel mounted upside
+      down relative to its transform) still cannot be expressed. Probably not
+      worth it; the affine map would stop being axis-aligned and `clampMM` would
+      need rethinking.
+- [ ] **Depth.** Panels at different distances from the user subtend different
+      angles, so equal desk-mm is not equal apparent motion. This is a real effect
+      on a curved or angled setup and the model has no term for it.
 
 ---
 
@@ -217,6 +233,36 @@ confirms it does.
 Consequence worth remembering: reconcile is therefore **lazy**. It happens on the
 next relative event, so `hyprctl mmcursor` will report
 `(external move pending reconcile)` in between. That is the mechanism working.
+
+## Config keywords do not survive a reload by themselves
+
+Hyprlang calls a keyword handler once per matching line and has no way to say "a
+line went away". So any state a handler accumulates has to be thrown away before
+each parse, or deleting a line leaves its effect in force until the compositor
+restarts — a `mmcursor-place` you removed still moving a monitor, with nothing in
+the config to explain it.
+
+`Event::bus()->m_events.config.preReload` is the hook for that; it sits next to
+`reloaded` in `EventBus.hpp`. The ordering is not documented and
+`ConfigManager.cpp` is not in the installed headers, so it was **verified
+empirically**: `verify-placement.sh` writes a config with an override, reloads,
+asserts it applies, writes one without it, reloads, and asserts it is gone. That
+passes, so `preReload` does fire before the parse.
+
+The sequence to preserve:
+
+```
+preReload  → clear every keyword-populated map
+(parse)    → handlers repopulate
+reloaded   → re-read config values, rebuild the layout
+```
+
+Config *values* never had this problem — Hyprlang holds those and hands back the
+current one. It is only keywords.
+
+Related: `hyprctl keyword plugin:mmcursor:gap_mm 5` applies a single value without
+re-parsing the file and so may never emit `reloaded`. That is what
+`hyprctl mmcursor reload` is for.
 
 ## Two bugs that only a compositor could find
 
@@ -324,9 +370,11 @@ binutils, any hooking plugin fails to resolve its target.
 | suite | checks | pins |
 |---|---|---|
 | `tests/test_geometry.cpp` | 81 | the pieces compute what they claim |
-| `tests/test_model.cpp` | 60,563 | properties/fuzz, a differential against a stock-Hyprland reference model, bit-identical no-op equivalence at uniform density, and the headline equal-travel property |
+| `tests/test_model.cpp` | 60,569 | properties/fuzz, a differential against a stock-Hyprland reference model, bit-identical no-op equivalence at uniform density, the headline equal-travel property, and the same property when the mismatch is a scale rather than a panel |
+| `tests/test_placement.cpp` | 402 | the desk derived from every arrangement — row, stack, L, grid, gapped, staggered, scaled — plus every override, order-independence over all 24 permutations, and the flush-in-logical-implies-flush-in-mm property |
 | `tests/test_apply.cpp` | 15,628 | the hook's decision logic against a simulated compositor that clamps like `closestValid` and gets warped behind our back |
-| `test/vm/verify.sh` | 12 | the same properties inside a real compositor, driven through `zwlr_virtual_pointer_v1` |
+| `test/vm/verify.sh` | 20 | the same properties inside a real compositor, driven through `zwlr_virtual_pointer_v1` |
+| `test/vm/verify-placement.sh` | 68 | every layout and override again, but written to `hyprland.conf` and reloaded each time, so the config path and the reload path are exercised rather than the API |
 
 The stock reference model in `test_model.cpp` carries its own independent clamp on
 purpose: a differential test whose two sides share the code under test proves

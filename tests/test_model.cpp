@@ -203,6 +203,60 @@ int main() {
     }
 
     // -----------------------------------------------------------------------
+    section("Tier 4b — the same property when the mismatch is a scale, not a panel");
+    // -----------------------------------------------------------------------
+    //
+    // Two identical panels, one at scale 2. Hyprland folds the scale into
+    // m_size before we ever see it, so from here this is just another density
+    // mismatch — but that is a claim, and this is what makes it a tested one.
+    // A HiDPI laptop next to an external monitor is the common shape of this.
+    {
+        const Layout scaled = buildLayout({[] {
+                                               MonitorDesc d;
+                                               d.name         = "HIDPI";
+                                               d.logical      = Rect{0, 0, 1280, 720}; // 2560x1440 at scale 2
+                                               d.edidMMWidth  = 600;
+                                               d.edidMMHeight = 340;
+                                               return d;
+                                           }(),
+                                           [] {
+                                               MonitorDesc d;
+                                               d.name         = "PLAIN";
+                                               d.logical      = Rect{1280, 0, 2560, 1440};
+                                               d.edidMMWidth  = 600;
+                                               d.edidMMHeight = 340;
+                                               return d;
+                                           }()});
+
+        nearly(scaled.monitors()[1].mm.x, 600.0, "identical panels are flush regardless of scale");
+        nearly(scaled.monitors()[0].mm.y, scaled.monitors()[1].mm.y, "and share a horizon");
+
+        CursorState st;
+        st.setLayout(&scaled);
+        st.setMMPerUnit(1.0);
+
+        st.reconcile(*scaled.toLogical(Vec2{300.0, 170.0}));
+        const double beforeHi = scaled.toLogical(st.positionMM())->y;
+        st.applyRelative(Vec2{0.0, 10.0});
+        nearly(scaled.toLogical(st.positionMM())->y - beforeHi, 10.0 * (720.0 / 340.0), "10mm on the scale-2 panel moves half as many logical px", 1e-6);
+
+        st.reconcile(*scaled.toLogical(Vec2{900.0, 170.0}));
+        const double beforePlain = scaled.toLogical(st.positionMM())->y;
+        st.applyRelative(Vec2{0.0, 10.0});
+        nearly(scaled.toLogical(st.positionMM())->y - beforePlain, 10.0 * (1440.0 / 340.0), "10mm on the scale-1 panel moves twice as many", 1e-6);
+
+        // Stock carries logical y across unchanged, so the scale mismatch
+        // becomes a physical jump exactly the way a panel mismatch does.
+        StockModel stock(scaled);
+        stock.seed(Vec2{1279.0, 719.0}); // bottom-right of the scaled panel
+        stock.applyRelative(Vec2{2.0, 0.0});
+        const auto crossed = scaled.toMM(stock.position());
+        check(crossed.has_value(), "stock lands on the other panel");
+        if (crossed)
+            check(std::fabs(crossed->y - 339.5) > 100.0, "and it lands over 100mm away from where it left");
+    }
+
+    // -----------------------------------------------------------------------
     section("Tier 2 — differential against stock: the seam discontinuity");
     // -----------------------------------------------------------------------
     //
@@ -577,12 +631,16 @@ int main() {
         check(!buildLayout({a, b}).firstMMOverlap().has_value(), "edge-adjacent panels are not an overlap");
 
         // Two explicit origins on top of each other are.
-        MonitorDesc c    = a;
-        MonitorDesc d    = a;
-        d.name           = "D";
-        c.explicitMMOrigin = Vec2{0, 0};
-        d.explicitMMOrigin = Vec2{250, 250};
-        const auto clash    = buildLayout({c, d}).firstMMOverlap();
+        MonitorDesc   c = a;
+        MonitorDesc   d = a;
+        d.name          = "D";
+        PlacementSpec pc;
+        pc.absoluteMM = Vec2{0, 0};
+        c.placement   = pc;
+        PlacementSpec pd;
+        pd.absoluteMM    = Vec2{250, 250};
+        d.placement      = pd;
+        const auto clash = buildLayout({c, d}).firstMMOverlap();
         check(clash.has_value(), "overlapping explicit origins are detected");
         if (clash)
             check((clash->first == "A" && clash->second == "D"), "the overlapping pair is named");

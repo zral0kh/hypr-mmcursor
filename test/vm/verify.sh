@@ -9,31 +9,10 @@
 # you can re-run after every Hyprland update — which is exactly when this breaks.
 set -uo pipefail
 
-export XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-/run/user/$(id -u)}
-export HYPRLAND_INSTANCE_SIGNATURE=$(ls -t "$XDG_RUNTIME_DIR"/hypr/ | head -1)
-export WAYLAND_DISPLAY=${WAYLAND_DISPLAY:-$(ls "$XDG_RUNTIME_DIR" | grep -E '^wayland-[0-9]+$' | head -1)}
+# shellcheck source=lib.sh
+. "$(dirname "$0")/lib.sh"
 
-VP="$(dirname "$0")/../vpointer/vpointer"
 [ -x "$VP" ] || { echo "build test/vpointer first"; exit 2; }
-
-PASS=0; FAIL=0
-mmx() { hyprctl mmcursor | awk -F'[:,]' '/^mm position/{gsub(/ /,"",$2); print $2}'; }
-mmy() { hyprctl mmcursor | awk -F'[:,]' '/^mm position/{gsub(/ /,"",$3); print $3}'; }
-curx() { hyprctl cursorpos | cut -d, -f1 | tr -d ' '; }
-cury() { hyprctl cursorpos | cut -d, -f2 | tr -d ' '; }
-mmper() { hyprctl mmcursor | awk '/^mm per input unit/{print $5}'; }
-
-near() { # value expected tolerance label
-    if python3 -c "import sys; sys.exit(0 if abs($1-($2))<=$3 else 1)" 2>/dev/null; then
-        printf "  PASS  %-58s %s ~= %s\n" "$4" "$1" "$2"; PASS=$((PASS+1))
-    else
-        printf "  FAIL  %-58s %s != %s (tol %s)\n" "$4" "$1" "$2" "$3"; FAIL=$((FAIL+1))
-    fi
-}
-# Seed the lazy reconcile: our reconcile is a pull, so it happens on the next
-# relative event, not at warp time. One null event is enough.
-settle() { "$VP" 0 0 1 >/dev/null 2>&1; sleep 0.4; }
-warp() { hyprctl dispatch movecursor "$1" "$2" >/dev/null; sleep 0.3; settle; }
 
 MMPU=$(mmper)
 echo "mm per input unit: $MMPU"
@@ -83,5 +62,18 @@ near "$(mmx)" "600+(3100-2560)/(1080/300)" 0.05 "mm x adopted the warp"
 near "$(mmy)" "-95+(960-(-240))/(1920/530)" 0.05 "mm y adopted the warp"
 
 echo
-echo "$PASS passed, $FAIL failed"
-exit $((FAIL > 0))
+echo "== 5. the derived layout matches what the unit tests predict =="
+# The baseline desk, derived rather than configured: Virtual-2 is centred on
+# Virtual-1's horizon because that is the relation the logical layout states.
+# tests/test_geometry.cpp asserts the same -95.
+near "$(mm_x Virtual-1)" 0 0.01 "Virtual-1 mm origin x"
+near "$(mm_y Virtual-1)" 0 0.01 "Virtual-1 mm origin y"
+near "$(mm_x Virtual-2)" 600 0.01 "Virtual-2 is flush right of Virtual-1"
+near "$(mm_y Virtual-2)" -95 0.01 "Virtual-2 centred on the horizon: (340-530)/2"
+same "$(mm_root)" "Virtual-1" "the leftmost panel is the root"
+contains "$(prov Virtual-2)" "right-of" "provenance names the relation"
+contains "$(prov Virtual-2)" "centre" "provenance names the alignment"
+same "$(mm_warnings)" "" "a derivable desk produces no warnings"
+
+summary
+exit $?

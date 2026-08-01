@@ -14,8 +14,8 @@ Concretely, on the desk this was written for:
 
 | | resolution | physical | density along the seam |
 |---|---|---|---|
-| DP-9 (Lenovo P27h-30) | 2560×1440 | 600×340 mm | 4.235 px/mm |
-| DP-10 (Acer CB242Y, rotated) | 1080×1920 | 300×530 mm | 3.623 px/mm |
+| Main | 2560×1440 | 600×340 mm | 4.235 px/mm |
+| Secondary | 1080×1920 | 300×530 mm | 3.623 px/mm |
 
 Physically centred on the same horizon, `auto-center-right` makes the centre
 seamless and everything else wrong. At the top edge of DP-9 the cursor lands
@@ -110,12 +110,47 @@ reconcile is therefore **lazy**: it happens on the next relative event, so
 `hyprctl mmcursor` will show `(external move pending reconcile)` in between. That
 is the mechanism working.
 
+### Where the desk layout comes from
+
+The mm layout is **derived from the arrangement Hyprland actually has active** —
+each monitor's `m_position` / `m_size` — so `auto`, `auto-center-right`,
+hand-written offsets, rotations and scales all arrive already resolved and no
+monitor rule ever has to be parsed.
+
+The subtlety, and the reason this is not a coordinate conversion: a logical
+offset cannot be turned into millimetres by dividing by a density, because the
+two panels have different densities and the offset spans both. DP-10 sits at
+logical `y = -240` against DP-9's 1440px/340mm; dividing gives 56.7mm. The
+physically true answer is 95mm.
+
+What the logical layout expresses is a **relation**. Both centres sit at logical
+`y = 720` — "centred" — and reproducing that relation physically gives exactly
+−95. So for each seam the builder asks which of three relations the arrangement
+states (near edges flush, far edges flush, or centres flush), takes the closest,
+reproduces it exactly in mm, and converts only the leftover residual through the
+anchor's density. An exactly-stated relation converts exactly; anything in
+between degrades continuously. There is no tolerance knob.
+
+Monitors are attached to each other by a spanning tree over logical adjacency,
+cheapest seam first, so vertical stacks, L-shapes and grids all work and the
+result never depends on the order monitors were declared in. Every one of those
+placements is reported by `hyprctl mmcursor`:
+
+```
+Virtual-1  mm [   0.00    0.00   600.00x340.00]  …  <- root
+Virtual-2  mm [ 600.00  -95.00   300.00x530.00]  …  <- right-of centre Virtual-1
+```
+
+`mmcursor-place` overrides any of it, either absolutely or as a relation. See
+**Config**.
+
 ### Bezel gaps
 
-`BuildOptions::gapMM` defaults to `0.0`, which makes panels edge-adjacent in mm
-space even though real bezels exist. That is a deliberate lie: the honest
-alternative is a dead zone where the cursor is "in the bezel" and visibly
-stalls. Set it to a real measurement if you would rather have physical honesty.
+`gap_mm` defaults to `0.0`, which makes panels edge-adjacent in mm space even
+though real bezels exist. That is a deliberate lie: the honest alternative is a
+dead zone where the cursor is "in the bezel" and visibly stalls. Set it to a
+real measurement if you would rather have physical honesty, or `mmcursor-gap`
+per seam, since bezels differ between pairs.
 
 Collapsing at build time rather than special-casing gaps at projection time is
 what keeps `clampMM` idempotent.
@@ -124,14 +159,16 @@ what keeps `clampMM` idempotent.
 
 ```
 src/geometry.hpp/.cpp        Rect, projection, clamping.       No Hyprland deps.
-src/layout_build.hpp/.cpp    EDID + transform → desk layout.   No Hyprland deps.
+src/layout_build.hpp/.cpp    Active layout → desk layout.      No Hyprland deps.
 src/cursor_state.hpp/.cpp    The mm accumulator.               No Hyprland deps.
 src/apply.hpp                Reconcile + correct decision.     No Hyprland deps.
 src/plugin.cpp               Hyprland glue. The only file with a hyprland #include.
 
 tests/test_geometry.cpp         81 checks — the pieces compute what they claim.
-tests/test_model.cpp        60,563 checks — the headline properties, and a
+tests/test_model.cpp        60,569 checks — the headline properties, and a
                                            differential vs stock behaviour.
+tests/test_placement.cpp       402 checks — the desk derived from every
+                                           arrangement, and every override.
 tests/test_apply.cpp        15,628 checks — the hook's logic against a
                                            simulated, adversarial compositor.
 
@@ -139,7 +176,10 @@ test/vm/run.sh               Arch VM: fetch, seed, boot, provision.
 test/vm/hyprland.conf        Reproduces this desk on two virtual heads.
 test/vm/restart-and-load.sh  Restart + load + triage a crash, inside the VM.
 test/vm/user-data.in         cloud-init template; `run.sh seed` fills it in.
-test/vm/verify.sh            12 assertions inside a running compositor.
+test/vm/lib.sh               Shared hyprctl helpers for the two verify scripts.
+test/vm/verify.sh            20 assertions on one desk, inside a compositor.
+test/vm/verify-placement.sh  68 more: every layout, override and edge case,
+                             each one written to hyprland.conf and reloaded.
 test/vpointer/               Feeds real relative motion via wlr-virtual-pointer.
 test/nested.conf             Alternative to the VM: a nested-session config.
 
@@ -165,15 +205,23 @@ values, calling `planMotion`, and writing the result back.
 Verified against **Hyprland 0.56.0** (the current Arch/Omarchy package) and
 cross-checked against 0.56.1. Both compile and pass.
 
-The core is written and tested — 76,272 checks, no compositor needed, mutation
+The core is written and tested — 76,680 checks, no compositor needed, mutation
 tested. `src/plugin.cpp` is written, builds clean, and every Hyprland touchpoint
 carries the source location that establishes it.
 
-**It runs.** In the test VM it passes 12 scripted assertions driven through the
+**It runs.** In the test VM it passes 88 scripted assertions driven through the
 real relative-pointer path (`make vm-up && make vm-verify`). The headline result:
 identical 47.05mm of physical travel moves the cursor 199 logical px on one panel
 and 170 on the other, and purely horizontal input produces zero physical vertical
 drift across the seam while logical y moves by the predicted 104.15px.
+
+Those assertions cover more than one desk. `verify-placement.sh` rewrites
+`hyprland.conf` and reloads for each of: centred, top-aligned and bottom-aligned
+side-by-side pairs; a deliberate logical gap; a vertical stack, crossed in both
+directions; a three-monitor L built on a headless output; a mirrored monitor; a
+panel at scale 2; every config override; deleting a config line and confirming
+its effect actually goes away; the `hyprctl` subcommands; and the refusals —
+overlapping mm rects, and a hotplugged output with no physical size.
 
 **And it works on the real desk.** Loaded on the DP-9/DP-10 hardware, ordinary
 movement, crossing between panels and hammering the outer boundaries all behave
@@ -184,8 +232,8 @@ bypassed — virtual outputs have no usable EDID, so all of them went through th
 `mmcursor-monitor` override branch instead.
 
 Not yet put under load — none of it known-broken, just unverified: pointer-locked
-games, tablet and touch, monitor hotplug and DPMS, and any scale other than 1. See
-`ROADMAP.md` item 1.
+games, tablet and touch, and DPMS. Scale ≠ 1 and hotplug are now covered in the
+VM but not on real hardware. See `ROADMAP.md` item 1.
 
 ### The hook site
 
@@ -237,11 +285,26 @@ plugin {
     mmcursor {
         enabled = true
 
-        # name, native width mm, native height mm, vertical offset mm
+        sensitivity = 1.0
+        gap_mm      = 0.0
+
+        # derive (default) reads each seam's alignment out of the layout
+        # Hyprland has active. top/center/bottom force every seam instead,
+        # for when that layout is itself wrong.
+        align = derive
+
+        # name, native width mm, native height mm [, vertical offset mm]
         # Sizes are in the panel's NATIVE orientation; rotation is applied
         # for you. Use 0 to trust EDID.
-        mmcursor-monitor = DP-9,  600, 340, 0
-        mmcursor-monitor = DP-10, 530, 300, 0
+        mmcursor-monitor = DP-9,  600, 340
+        mmcursor-monitor = DP-10, 530, 300
+
+        # Placement is derived, so none of the rest is normally needed.
+        # Each line overrides that derivation.
+        mmcursor-place  = DP-10, at, 620, -95         # absolute mm origin
+        mmcursor-place  = DP-11, below, DP-9, left, 12 # edge, anchor, align, offset
+        mmcursor-gap    = DP-9, DP-10, 22             # this seam's bezel, mm
+        mmcursor-offset = DP-10, 0, -4                # 2D nudge, mm
     }
 }
 ```
@@ -250,6 +313,35 @@ EDID physical sizes are wrong often enough that the override path is not
 optional. Yours look plausible — 600×340 and 530×300 are sane for a 27" and a
 24" — but do not trust the field in general, and headless outputs always report
 `0x0`.
+
+`mmcursor-place` takes either `NAME, at, x_mm, y_mm` or
+`NAME, right-of|left-of|above|below, ANCHOR [, align] [, offset_mm]`. Alignment
+is `derive` (default), `top`/`left`, `center`, or `bottom`/`right` — the two
+spellings are the same thing, named for whichever axis reads naturally at that
+seam. An absolute placement also makes that monitor the layout's root, which is
+how you pin pointer feel to a chosen panel.
+
+### Changing any of it
+
+**Nothing here requires rebuilding the plugin.** Hyprland watches
+`hyprland.conf` with inotify, so saving the file is enough: the reload
+re-parses the keywords and the plugin rebuilds its layout. Only a Hyprland
+*upgrade* needs `make plugin`, and the ABI guard turns a stale build into a
+clean refusal rather than a crash.
+
+Two escape hatches for the paths that do not emit a reload, and for tuning:
+
+```sh
+hyprctl mmcursor                       # what the layout is and how it got there
+hyprctl mmcursor reload                # force a re-read (e.g. after hyprctl keyword)
+hyprctl mmcursor place  DP-10 620 -95  # try an origin, immediately
+hyprctl mmcursor offset DP-10 0 -4     # nudge, immediately
+```
+
+`place` and `offset` deliberately **do not persist** — the next config reload
+drops them. Positioning a monitor is a tape-measure job, and edit-save-reload
+for every 5mm is miserable; but `hyprland.conf` stays the single source of
+truth, so a tuning session cannot silently become your configuration.
 
 ## Loading it on startup
 
@@ -357,7 +449,7 @@ Four separate sets, because they genuinely are separate — the whole point of t
 architecture is that the interesting half needs none of the heavy ones.
 
 **To run the unit tests: a C++23 compiler. That is the entire list.** No Hyprland,
-no headers, no compositor, no GPU. 76,272 checks in a couple of seconds.
+no headers, no compositor, no GPU. 76,680 checks in a couple of seconds.
 
 ```sh
 make test
@@ -405,12 +497,12 @@ allocator never needs a render node.
 ## Building
 
 ```sh
-make test             # compiler only, no Hyprland, ASan+UBSan, 3 suites
+make test             # compiler only, no Hyprland, ASan+UBSan, 4 suites
 make plugin           # needs Hyprland headers; checks the toolchain first
 make check-toolchain  # compare your compiler against Hyprland's
 
 make vm-up            # fetch, boot and provision the Arch test VM
-make vm-verify        # build inside it, load the plugin, run 12 assertions
+make vm-verify        # build inside it, load the plugin, run 88 assertions
 make vm-down
 ```
 
@@ -552,8 +644,10 @@ something asks for a specific logical pixel, it gets that pixel; we only
 reconcile our mm state to match. That is the right call — those callers mean
 logical coordinates.
 
-The row builder handles a single horizontal row, ordered by existing logical x.
-Anything else needs `explicitMMOrigin` per monitor.
+Placement is axis-aligned and flat. A panel physically rotated in a way
+`transform` does not describe, or one sitting closer to you than its neighbour,
+cannot be expressed — the affine map would stop being axis-aligned and `clampMM`
+would need rethinking. See `ROADMAP.md` item 2.
 
 Pointer moves fewer pixels per hand-inch on the lower-density panel. That is
 correct, and some people hate it.
