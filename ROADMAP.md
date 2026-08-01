@@ -32,7 +32,7 @@ headless output; a mirrored monitor; a panel at scale 2; every config override;
 deleting a config line and confirming the effect goes with it; the `hyprctl`
 subcommands; and the two refusals.
 
-**It works on the real desk.** Loaded on the DP-9/DP-10 hardware it behaves
+**It works on the real desk.** Loaded on the Main/Secondary hardware it behaves
 correctly for ordinary cursor movement, crossing between the two panels, and
 hammering the outer boundaries. That last one matters more than it sounds: edge
 spamming is where a mm accumulator that drifted out of the clamped region would
@@ -170,7 +170,7 @@ Worth considering rather than maintaining a plugin forever. The architecture is 
 clean fit for a compositor feature:
 
 ```
-monitor = DP-9, ..., physical_mm, 600x340
+monitor = Main, ..., physical_mm, 600x340
 input:physical_cursor_space = true
 ```
 

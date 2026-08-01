@@ -36,9 +36,27 @@
 #include <unordered_map>
 #include <vector>
 
+// Stamped by the Makefile, which derives it from ./VERSION plus the commit, so
+// a loaded plugin can say both which release it is and which source built it —
+// the question you actually have after a post-update hook rebuilds it for you.
+//
+// Deliberately NOT a version number here. ./VERSION is the single source of
+// truth, matched against the git tag by `make check-version`; a second literal
+// in this file is precisely the thing that drifts from the tag and makes a
+// GitHub release disagree with what the plugin reports. This fallback is only
+// reachable by compiling plugin.cpp without the Makefile.
+#ifndef MMCURSOR_VERSION
+#define MMCURSOR_VERSION "unknown"
+#endif
+
 inline HANDLE PHANDLE = nullptr;
 
 namespace {
+
+// The ABI string we were compiled against, captured at init. Since the guard
+// below refuses to load on a mismatch, seeing this at all means it matched the
+// running compositor — its value is telling you which Hyprland that was.
+std::string g_builtAgainst;
 
 pcs::Layout      g_layout;
 pcs::CursorState g_cursor;
@@ -646,9 +664,17 @@ void reloadConfigValues() {
 // A hyprctl command rather than a dispatcher, because a dispatcher can only
 // return success/error (SDispatchResult, SharedDefs.hpp:52) whereas this hands
 // text back to the terminal.
+// One line, so a pasted dump identifies itself. Not a separate subcommand: a
+// version you have to ask for separately is a version nobody includes in the
+// bug report.
+std::string versionLine() {
+    return std::format("mmcursor {}  (built against {})\n", MMCURSOR_VERSION, g_builtAgainst.empty() ? "?" : g_builtAgainst);
+}
+
 std::string debugDump() {
     std::string out;
 
+    out += versionLine();
     out += std::format("mmcursor: {}\n", g_enabled ? "enabled" : "disabled");
     out += std::format("mm per input unit: {:.6f}  (sensitivity {:.3f})\n", g_cursor.mmPerUnit(), g_sensitivity);
     const char* ALIGN_NAME = g_align == pcs::Align::Start ? "top/left" : (g_align == pcs::Align::End ? "bottom/right" : (g_align == pcs::Align::Center ? "center" : "derive"));
@@ -726,6 +752,12 @@ std::string ctlCommand(eHyprCtlOutputFormat /*format*/, std::string args) {
     if (tok.empty())
         return debugDump();
 
+    // For scripting. `hyprctl plugin list` is the idiomatic place to read a
+    // plugin's version — this exists so a post-update hook can check what it
+    // rebuilt without parsing that.
+    if (tok[0] == "version")
+        return versionLine();
+
     if (tok[0] == "reload") {
         reloadConfigValues();
         rebuildLayout();
@@ -752,7 +784,7 @@ std::string ctlCommand(eHyprCtlOutputFormat /*format*/, std::string args) {
         return debugDump();
     }
 
-    return "usage: hyprctl mmcursor [reload | place NAME X_MM Y_MM | offset NAME DX_MM DY_MM]\n";
+    return "usage: hyprctl mmcursor [version | reload | place NAME X_MM Y_MM | offset NAME DX_MM DY_MM]\n";
 }
 
 SP<SHyprCtlCommand> g_ctlCommand;
@@ -784,6 +816,7 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
     // fires on every load and the plugin never runs. (It did exactly that.)
     const std::string_view SERVER_ABI = __hyprland_api_get_hash();
     const std::string_view CLIENT_ABI = __hyprland_api_get_client_hash();
+    g_builtAgainst                    = std::string{CLIENT_ABI};
     if (SERVER_ABI != CLIENT_ABI) {
         HyprlandAPI::addNotification(PHANDLE, std::format("[mmcursor] ABI mismatch; refusing to load.\n  compositor: {}\n  plugin:     {}", SERVER_ABI, CLIENT_ABI),
                                      CHyprColor{1.0F, 0.2F, 0.2F, 1.0F}, 10000);
@@ -888,7 +921,9 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
     reloadConfigValues();
     rebuildLayout();
 
-    return {"mmcursor", "Cursor motion in physical millimetres across mismatched-density monitors", "you", "0.1.0"};
+    // This is what `hyprctl plugin list` prints, and it is the idiomatic place
+    // for a plugin's version — hence no separate --version flag.
+    return {"mmcursor", "Cursor motion in physical millimetres across mismatched-density monitors", "you", MMCURSOR_VERSION};
 }
 
 APICALL EXPORT void PLUGIN_EXIT() {

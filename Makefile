@@ -5,7 +5,7 @@
 CORE_SRC := src/geometry.cpp src/layout_build.cpp src/cursor_state.cpp
 CXXFLAGS_COMMON := -std=c++23 -Wall -Wextra -Wconversion -O2
 
-.PHONY: test plugin check-toolchain load unload clean
+.PHONY: test plugin check-toolchain check-version load unload clean
 
 # ---------------------------------------------------------------------------
 # The part you should be running constantly.
@@ -38,11 +38,52 @@ test:
 # Verified working against 0.56.0 built with GCC 16.1.1. `make check-toolchain`
 # tells you if that stopped being true before you spend time on a crash.
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Versioning.
+#
+# See the ./VERSION file is the single source of truth. 
+# Let all other sources derive from that
+#
+# Releasing:
+#     edit VERSION  ->  commit  ->  git tag v$(cat VERSION)  ->  git push --tags
+#
+# `check-version` refuses to build a tagged commit whose tag disagrees, so the
+# mistake is caught at the moment it would ship rather than after.
+#
+# Off-tag builds append the commit, because the second-most-common real failure
+# after "stale .so following a Hyprland upgrade" is "the rebuild did not
+# actually happen" — and both are then answerable from the running compositor
+# instead of by comparing file timestamps.
+#
+#     on tag v0.2.0, clean    ->  0.2.0
+#     three commits on, dirty ->  0.2.0+7be5c2f-dirty
+#     tarball, no .git        ->  0.2.0
+#
+# `make vm-verify` ships the tree by tar, with no .git, so that last case is not
+# theoretical. Never make a missing git a hard failure.
+VERSION_BASE := $(shell cat VERSION 2>/dev/null || echo unknown)
+GIT_EXACT    := $(shell git describe --exact-match --tags 2>/dev/null)
+GIT_REV      := $(shell git describe --always --dirty --exclude '*' 2>/dev/null)
+VERSION      := $(if $(GIT_EXACT),$(VERSION_BASE),$(if $(GIT_REV),$(VERSION_BASE)+$(GIT_REV),$(VERSION_BASE)))
+
 PLUGIN_CXXFLAGS := $(CXXFLAGS_COMMON) -shared -fPIC --no-gnu-unique \
+	-DMMCURSOR_VERSION='"$(VERSION)"' \
 	$(shell pkg-config --cflags pixman-1 libdrm hyprland)
 
-plugin: check-toolchain
+plugin: check-toolchain check-version
 	$(CXX) $(PLUGIN_CXXFLAGS) -o build/mmcursor.so src/plugin.cpp $(CORE_SRC)
+	@echo "built mmcursor $(VERSION)"
+
+# If HEAD carries a release tag, it must agree with VERSION. Untagged commits
+# are ordinary development and are left alone.
+check-version:
+	@t="$(GIT_EXACT)"; v="$(VERSION_BASE)"; \
+	if [ -n "$$t" ] && [ "$$t" != "v$$v" ]; then \
+		echo "ERROR: ./VERSION says $$v but HEAD is tagged $$t."; \
+		echo "       These must match — the tag is what GitHub publishes as a release."; \
+		echo "       Fix ./VERSION, or retag:  git tag -f v$$v"; \
+		exit 1; \
+	fi
 
 # Hyprland records its compiler in .comment. Compare it with ours.
 check-toolchain:
@@ -90,7 +131,7 @@ vm-up:
 #                    edge case. It rewrites hyprland.conf repeatedly and
 #                    restores it on exit.
 vm-verify:
-	tar cf - src tests Makefile test | ./test/vm/run.sh ssh 'rm -rf ~/mmcursor && mkdir -p ~/mmcursor && cd ~/mmcursor && tar xf -'
+	tar cf - src tests Makefile VERSION test | ./test/vm/run.sh ssh 'rm -rf ~/mmcursor && mkdir -p ~/mmcursor && cd ~/mmcursor && tar xf -'
 	./test/vm/run.sh ssh 'cd ~/mmcursor && make plugin && make -C test/vpointer'
 	./test/vm/run.sh ssh 'cd ~/mmcursor && ./test/vm/restart-and-load.sh'
 	./test/vm/run.sh ssh 'cd ~/mmcursor && ./test/vm/verify.sh'

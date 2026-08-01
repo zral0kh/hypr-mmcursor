@@ -18,7 +18,7 @@ Concretely, on the desk this was written for:
 | Secondary | 1080×1920 | 300×530 mm | 3.623 px/mm |
 
 Physically centred on the same horizon, `auto-center-right` makes the centre
-seamless and everything else wrong. At the top edge of DP-9 the cursor lands
+seamless and everything else wrong. At the top edge of Main the cursor lands
 **28.75 mm** away from where your hand says it should. There is a test asserting
 exactly that number, because it is the thing this plugin exists to delete.
 
@@ -119,8 +119,8 @@ monitor rule ever has to be parsed.
 
 The subtlety, and the reason this is not a coordinate conversion: a logical
 offset cannot be turned into millimetres by dividing by a density, because the
-two panels have different densities and the offset spans both. DP-10 sits at
-logical `y = -240` against DP-9's 1440px/340mm; dividing gives 56.7mm. The
+two panels have different densities and the offset spans both. Secondary sits at
+logical `y = -240` against Main's 1440px/340mm; dividing gives 56.7mm. The
 physically true answer is 95mm.
 
 What the logical layout expresses is a **relation**. Both centres sit at logical
@@ -183,6 +183,8 @@ test/vm/verify-placement.sh  68 more: every layout, override and edge case,
 test/vpointer/               Feeds real relative motion via wlr-virtual-pointer.
 test/nested.conf             Alternative to the VM: a nested-session config.
 
+VERSION                      The release number. Single source of truth; the git
+                             tag and the reported version both derive from it.
 README.md                    This file — the design, and why it is shaped this way.
 ROADMAP.md                   What is left to do, plus the facts worth not
                              rediscovering (hook site, the two glue bugs, why
@@ -223,7 +225,7 @@ panel at scale 2; every config override; deleting a config line and confirming
 its effect actually goes away; the `hyprctl` subcommands; and the refusals —
 overlapping mm rects, and a hotplugged output with no physical size.
 
-**And it works on the real desk.** Loaded on the DP-9/DP-10 hardware, ordinary
+**And it works on the real desk.** Loaded on the Main/Secondary hardware, ordinary
 movement, crossing between panels and hammering the outer boundaries all behave
 correctly. Edge hammering is the interesting one: it is where an mm accumulator
 that had drifted outside the clamped region would surface as hysteresis, and it
@@ -296,15 +298,15 @@ plugin {
         # name, native width mm, native height mm [, vertical offset mm]
         # Sizes are in the panel's NATIVE orientation; rotation is applied
         # for you. Use 0 to trust EDID.
-        mmcursor-monitor = DP-9,  600, 340
-        mmcursor-monitor = DP-10, 530, 300
+        mmcursor-monitor = Main,  600, 340
+        mmcursor-monitor = Secondary, 530, 300
 
         # Placement is derived, so none of the rest is normally needed.
         # Each line overrides that derivation.
-        mmcursor-place  = DP-10, at, 620, -95         # absolute mm origin
-        mmcursor-place  = DP-11, below, DP-9, left, 12 # edge, anchor, align, offset
-        mmcursor-gap    = DP-9, DP-10, 22             # this seam's bezel, mm
-        mmcursor-offset = DP-10, 0, -4                # 2D nudge, mm
+        mmcursor-place  = Secondary, at, 620, -95         # absolute mm origin
+        mmcursor-place  = DP-11, below, Main, left, 12 # edge, anchor, align, offset
+        mmcursor-gap    = Main, Secondary, 22             # this seam's bezel, mm
+        mmcursor-offset = Secondary, 0, -4                # 2D nudge, mm
     }
 }
 ```
@@ -333,9 +335,10 @@ Two escape hatches for the paths that do not emit a reload, and for tuning:
 
 ```sh
 hyprctl mmcursor                       # what the layout is and how it got there
+hyprctl mmcursor version               # which release and commit built this .so
 hyprctl mmcursor reload                # force a re-read (e.g. after hyprctl keyword)
-hyprctl mmcursor place  DP-10 620 -95  # try an origin, immediately
-hyprctl mmcursor offset DP-10 0 -4     # nudge, immediately
+hyprctl mmcursor place  Secondary 620 -95  # try an origin, immediately
+hyprctl mmcursor offset Secondary 0 -4     # nudge, immediately
 ```
 
 `place` and `offset` deliberately **do not persist** — the next config reload
@@ -412,6 +415,46 @@ the hook during ordinary motion is **not** caught and would take the session dow
 and while autoloaded, on every login. Recovery is a TTY (`Ctrl+Alt+F3`) and
 commenting out the `plugin` line. That is why you load it by hand and use it for a
 while before putting it in the config, not the other way round.
+
+### Versioning and releases
+
+`./VERSION` is the **single source of truth**. The git tag, the GitHub release
+and what the plugin reports all come from it, so there is exactly one number in
+the repo to bump and nothing that can quietly drift out of sync.
+
+```sh
+$EDITOR VERSION            # 0.2.0
+git commit -am "release 0.2.0"
+git tag v0.2.0
+git push --tags
+```
+
+`make plugin` runs `check-version`, which **refuses to build a tagged commit
+whose tag disagrees with `./VERSION`** — so the mistake is caught at the moment
+it would ship, not after the release is published. Untagged commits are ordinary
+development and are left alone.
+
+Off-tag builds append the commit, because the version answers two different
+questions and both matter:
+
+| built | reports |
+|---|---|
+| on tag `v0.2.0`, clean tree | `0.2.0` |
+| three commits later, dirty | `0.2.0+7be5c2f-dirty` |
+| source tarball, no `.git` | `0.2.0` |
+
+The second row is the useful one. After a post-update hook rebuilds the plugin
+for you, "is the loaded `.so` actually built from my current tree" stops being a
+question about file timestamps:
+
+```sh
+hyprctl mmcursor version   # mmcursor 0.2.0+7be5c2f-dirty  (built against 36b2e0c…)
+hyprctl plugin list        # the same version, via the plugin API's own field
+```
+
+There is deliberately **no version literal in the source** — a second number in
+`plugin.cpp` is precisely the thing that drifts from the tag and makes a GitHub
+release disagree with what the plugin reports.
 
 ### Rebuild after every Hyprland update
 

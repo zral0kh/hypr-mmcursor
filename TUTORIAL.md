@@ -34,8 +34,8 @@ this was written for, that divergence reaches **28.75 mm** at the top edge:
 
 | | resolution | physical | density |
 |---|---|---|---|
-| DP-9 | 2560×1440 | 600×340 mm | 4.235 px/mm |
-| DP-10 (rotated) | 1080×1920 | 300×530 mm | 3.623 px/mm |
+| Main | 2560×1440 | 600×340 mm | 4.235 px/mm |
+| Secondary (rotated) | 1080×1920 | 300×530 mm | 3.623 px/mm |
 
 The fix is a change of canonical coordinate system. **Millimetres are ground
 truth; logical pixels are a projection.**
@@ -459,7 +459,7 @@ The obvious way to derive a desk from Hyprland's layout is to convert each
 monitor's logical origin to millimetres. It gives the wrong answer, and the desk
 this was built for shows exactly why.
 
-DP-10 sits at logical `y = -240`. Divide by DP-9's 1440px/340mm and you get
+Secondary sits at logical `y = -240`. Divide by Main's 1440px/340mm and you get
 56.7mm. The physically true offset is **95mm**. The conversion is wrong because
 the offset spans *two* panels of different density, and dividing by one of them
 assumes they match.
@@ -681,14 +681,14 @@ plugin {
 
         # name, physical width mm, physical height mm [, vertical offset mm]
         # width/height in NATIVE orientation; rotation is applied for you.
-        mmcursor-monitor = DP-9,  600, 340
-        mmcursor-monitor = DP-10, 530, 300
+        mmcursor-monitor = Main,  600, 340
+        mmcursor-monitor = Secondary, 530, 300
 
         # Placement is derived from the active layout; these override it.
-        mmcursor-place  = DP-10, at, 620, -95
-        mmcursor-place  = DP-11, below, DP-9, left, 12
-        mmcursor-gap    = DP-9, DP-10, 22
-        mmcursor-offset = DP-10, 0, -4
+        mmcursor-place  = Secondary, at, 620, -95
+        mmcursor-place  = DP-11, below, Main, left, 12
+        mmcursor-gap    = Main, Secondary, 22
+        mmcursor-offset = Secondary, 0, -4
     }
 }
 ```
@@ -744,14 +744,23 @@ behind the same registration (which is why `exact` is `false` — a bare-name ma
 would not let arguments through):
 
 ```sh
+hyprctl mmcursor version               # release + commit + the ABI it was built against
 hyprctl mmcursor reload                # re-read config + rebuild
-hyprctl mmcursor place  DP-10 620 -95  # try an origin, immediately
-hyprctl mmcursor offset DP-10 0 -4     # nudge, immediately
+hyprctl mmcursor place  Secondary 620 -95  # try an origin, immediately
+hyprctl mmcursor offset Secondary 0 -4     # nudge, immediately
 ```
 
 `place` and `offset` are for tuning — positioning a monitor is a tape-measure
 job — and deliberately do not persist, so `hyprland.conf` stays the one source of
 truth.
+
+There is no `--version` flag, and that is deliberate. `PLUGIN_DESCRIPTION_INFO`
+is the plugin API's *own* version field and `hyprctl plugin list` already prints
+it, so inventing a second convention would only create somewhere else to forget
+to bump. That field and the `version` subcommand read the same string, stamped by
+the Makefile from `./VERSION` plus the commit — see "Versioning and releases" in
+[README.md](README.md). The dump repeats it on its first line, so a pasted dump
+identifies itself without anyone having to ask which build it came from.
 
 ### [`PLUGIN_EXIT`](src/plugin.cpp#L583-L592)
 

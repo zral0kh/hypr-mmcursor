@@ -285,6 +285,10 @@ near "$(mm_y Virtual-2)" -95 0.01 "and derivation is back in charge"
 
 contains "$(hyprctl mmcursor nonsense)" "usage" "an unknown subcommand explains itself"
 
+contains "$(hyprctl mmcursor version)" "built against" "version reports the ABI it was built against"
+contains "$(hyprctl mmcursor)" "mmcursor 0" "the dump identifies itself, so a pasted one is traceable"
+contains "$(hyprctl plugin list)" "mmcursor" "hyprctl plugin list is the idiomatic version surface"
+
 # ---------------------------------------------------------------------------
 # Edge cases. Each of these has exactly one correct behaviour and it is not
 # "carry on quietly".
