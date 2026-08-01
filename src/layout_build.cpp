@@ -199,6 +199,12 @@ Adjacency adjacencyOf(const Node& parent, const Node& child) {
     return {};
 }
 
+// Same rule as Layout::firstMMOverlap: strict on both axes, because
+// edge-adjacent panels share a boundary and that is the normal case.
+bool overlaps(const Rect& a, const Rect& b) {
+    return a.x < b.right() && b.x < a.right() && a.y < b.bottom() && b.y < a.bottom();
+}
+
 double seamGapFor(const BuildOptions& opts, const std::string& a, const std::string& b) {
     for (const auto& g : opts.seamGaps) {
         if ((g.a == a && g.b == b) || (g.a == b && g.b == a))
@@ -413,12 +419,46 @@ Layout buildLayout(std::vector<MonitorDesc> descs, const BuildOptions& opts, Bui
         else
             warn(std::format("{}: touches no other monitor in the logical layout; falling back to its logical position", nodes[i].desc->name));
 
-        nodes[i].origin = {root.origin.x + (nodes[i].desc->logical.x - root.desc->logical.x) / density(root, AXIS_X),
-                           root.origin.y + (nodes[i].desc->logical.y - root.desc->logical.y) / density(root, AXIS_Y)};
+        Vec2 origin = {root.origin.x + (nodes[i].desc->logical.x - root.desc->logical.x) / density(root, AXIS_X),
+                       root.origin.y + (nodes[i].desc->logical.y - root.desc->logical.y) / density(root, AXIS_Y)};
+
+        // A guess must never manufacture an overlap. The caller refuses a layout
+        // whose mm rects collide — reasonably, since which panel owns a point
+        // would come down to declaration order — so a fallback that lands on top
+        // of another panel would disable the plugin and blame the user's config
+        // for a position we invented.
+        //
+        // The case that reaches here in practice is a compositor mid-configura-
+        // tion, where two monitors briefly share a logical rect: the converted
+        // offset is then zero and this lands exactly on the root.
+        //
+        // finish() adds the user's own offset afterwards, so collide-test where
+        // the panel will actually end up, not where it is about to be stored.
+        const Vec2 OFF = nodes[i].desc->offsetMM;
+        const Rect LANDING{origin.x + OFF.x, origin.y + OFF.y, nodes[i].size.x, nodes[i].size.y};
+
+        bool collides = false;
+        double clearX = 0.0;
+        for (const std::size_t j : placedOrder) {
+            const Rect PLACED{nodes[j].origin.x, nodes[j].origin.y, nodes[j].size.x, nodes[j].size.y};
+            clearX = std::max(clearX, PLACED.right());
+            if (overlaps(LANDING, PLACED))
+                collides = true;
+        }
+
+        if (collides) {
+            // Park it clear to the right of everything placed so far. Nothing
+            // can then overlap it in x, and a second fallback stacks beyond
+            // this one because clearX is recomputed each time.
+            origin.x = clearX + opts.gapMM - OFF.x;
+            warn(std::format("{}: its fallback position collided with an already-placed monitor; parked clear at {:.1f}mm", nodes[i].desc->name, clearX + opts.gapMM));
+        }
+
+        nodes[i].origin = origin;
         nodes[i].placed = true;
         auto* n         = note(i);
         if (n)
-            n->how = "fallback";
+            n->how = collides ? "fallback, parked clear" : "fallback";
         finish(i, n);
     }
 

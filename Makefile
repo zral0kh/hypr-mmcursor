@@ -121,17 +121,21 @@ vm-up:
 # Push the tree in, build in there, load, and assert. `vm-verify` is the target
 # that turns "does the seam feel right" into pass/fail.
 #
-# verify.sh          the cursor behaves correctly on one desk
+# verify.sh           the cursor behaves correctly on one desk
 # verify-placement.sh the desk itself is derived correctly from whatever
-#                    arrangement Hyprland has active, plus every override and
-#                    edge case. It rewrites hyprland.conf repeatedly and
-#                    restores it on exit.
+#                     arrangement Hyprland has active, plus every override and
+#                     edge case. It rewrites hyprland.conf repeatedly and
+#                     restores it on exit.
+# verify-autoload.sh  the startup path: plugin loaded BY CONFIG, so it is live
+#                     while monitors are still being brought up. Runs last
+#                     because it restarts the compositor with its own config.
 vm-verify:
 	tar cf - src tests Makefile VERSION test | ./test/vm/run.sh ssh 'rm -rf ~/mmcursor && mkdir -p ~/mmcursor && cd ~/mmcursor && tar xf -'
 	./test/vm/run.sh ssh 'cd ~/mmcursor && make plugin && make -C test/vpointer'
 	./test/vm/run.sh ssh 'cd ~/mmcursor && ./test/vm/restart-and-load.sh'
 	./test/vm/run.sh ssh 'cd ~/mmcursor && ./test/vm/verify.sh'
 	./test/vm/run.sh ssh 'cd ~/mmcursor && ./test/vm/verify-placement.sh'
+	./test/vm/run.sh ssh 'cd ~/mmcursor && ./test/vm/verify-autoload.sh'
 
 vm-ssh:
 	./test/vm/run.sh ssh

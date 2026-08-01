@@ -69,6 +69,22 @@ pcs::Align       g_align       = pcs::Align::Derive;
 // How the last rebuild placed each monitor, for `hyprctl mmcursor`.
 pcs::BuildDiagnostics g_diag;
 
+// Why the last rebuild declined to produce a layout, if it did. Empty in the
+// normal case. Surfaced by the debug dump so a deferral is visible rather than
+// looking like the plugin quietly doing nothing.
+std::string g_pending;
+
+// Rebuild tally, for the debug dump.
+//
+// `refusals` is the one worth watching. A refusal disables the plugin, and the
+// next successful rebuild silently un-disables it — so by the time anyone looks,
+// a spurious refusal has left no trace but a toast nobody can reproduce. That is
+// exactly how the 0.2.0 startup bug hid: the end state was always correct.
+// Counting them makes it assertable.
+unsigned g_rebuilds  = 0;
+unsigned g_deferrals = 0;
+unsigned g_refusals  = 0;
+
 // The logical position we last observed immediately after our own warp.
 //
 // This is the whole reconcile mechanism; see hkPointerMove(). It is a readback,
@@ -157,6 +173,8 @@ struct {
 // includes disabled outputs — we want monitors().
 //                                                      state/MonitorState.cpp:53
 void rebuildLayout() {
+    ++g_rebuilds;
+
     std::vector<pcs::MonitorDesc> descs;
 
     for (const auto& m : State::monitorState()->monitors()) {
@@ -203,6 +221,7 @@ void rebuildLayout() {
         if (d.overrideMMWidth.value_or(d.edidMMWidth) <= 0.0 || d.overrideMMHeight.value_or(d.edidMMHeight) <= 0.0) {
             HyprlandAPI::addNotification(PHANDLE, "[mmcursor] " + d.name + " has no physical size; set mmcursor-monitor for it. Disabling.",
                                          CHyprColor{1.0F, 0.7F, 0.2F, 1.0F}, 6000);
+            ++g_refusals;
             g_layout = pcs::Layout{};
             g_cursor.setLayout(nullptr);
             g_cursor.invalidate();
@@ -211,6 +230,33 @@ void rebuildLayout() {
 
         descs.push_back(std::move(d));
     }
+
+    // Hyprland brings monitors up one at a time and applies their rules as it
+    // goes, so during startup — and briefly during hotplug — two monitors can
+    // share a logical rect before the second one is positioned. That is the
+    // compositor mid-configuration, not a layout.
+    //
+    // It matters because overlapping logical rects are not adjacent by any
+    // axis, so nothing can attach to anything, every monitor falls back, and
+    // the result is an mm layout we would then refuse — disabling the plugin
+    // and blaming `mmcursor-monitor` for a state the user had no part in. The
+    // notification is transient, because the next layoutChanged rebuilds
+    // correctly, which makes it purely alarming and never actionable.
+    //
+    // So: if the compositor's own rects overlap, this is not settled. Keep
+    // whatever layout we already had and wait to be called again.
+    for (std::size_t i = 0; i < descs.size(); ++i) {
+        for (std::size_t j = i + 1; j < descs.size(); ++j) {
+            const auto& A = descs[i].logical;
+            const auto& B = descs[j].logical;
+            if (A.x < B.right() && B.x < A.right() && A.y < B.bottom() && B.y < A.bottom()) {
+                g_pending = std::format("{} and {} overlap in Hyprland's own layout; waiting for it to settle", descs[i].name, descs[j].name);
+                ++g_deferrals;
+                return;
+            }
+        }
+    }
+    g_pending.clear();
 
     pcs::BuildOptions opts;
     opts.align    = g_align;
@@ -234,8 +280,17 @@ void rebuildLayout() {
     // teleports between them for reasons nothing in the config explains. Refuse
     // rather than project through whichever rect happened to be listed first.
     if (const auto CLASH = g_layout.firstMMOverlap()) {
-        HyprlandAPI::addNotification(PHANDLE, std::format("[mmcursor] {} and {} overlap in mm space; check mmcursor-monitor. Disabling.", CLASH->first, CLASH->second),
+        // Only point at the config when the config is actually implicated.
+        // Telling someone to check a keyword they never wrote sends them
+        // looking for a mistake that is not there.
+        const bool FROM_CONFIG = g_placements.contains(CLASH->first) || g_placements.contains(CLASH->second) || g_overrides.contains(CLASH->first) ||
+            g_overrides.contains(CLASH->second) || g_liveOrigins.contains(CLASH->first) || g_liveOrigins.contains(CLASH->second);
+
+        HyprlandAPI::addNotification(PHANDLE,
+                                     FROM_CONFIG ? std::format("[mmcursor] {} and {} overlap in mm space; check mmcursor-place / mmcursor-monitor. Disabling.", CLASH->first, CLASH->second) :
+                                                   std::format("[mmcursor] {} and {} overlap in mm space. Disabling — run `hyprctl mmcursor` to see how each was placed.", CLASH->first, CLASH->second),
                                      CHyprColor{1.0F, 0.7F, 0.2F, 1.0F}, 8000);
+        ++g_refusals;
         g_layout = pcs::Layout{};
         g_cursor.setLayout(nullptr);
         g_cursor.invalidate();
@@ -684,6 +739,11 @@ std::string debugDump() {
             out += std::format("  seam {} <-> {}: {:.2f} mm\n", g.a, g.b, g.mm);
     }
 
+    out += std::format("rebuilds: {}  deferred: {}  refused: {}\n", g_rebuilds, g_deferrals, g_refusals);
+
+    if (!g_pending.empty())
+        out += std::format("\ndeferring: {}\n", g_pending);
+
     if (g_layout.empty()) {
         out += "\nlayout: EMPTY — plugin is inert.\n";
         return out;
@@ -936,5 +996,6 @@ APICALL EXPORT void PLUGIN_EXIT() {
     g_cursor.invalidate();
     g_layout = pcs::Layout{};
     g_diag   = pcs::BuildDiagnostics{};
+    g_pending.clear();
     clearConfigState();
 }

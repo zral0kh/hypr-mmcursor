@@ -313,6 +313,43 @@ int main() {
         check(d4.warnings.empty(), "with nothing to complain about");
     }
 
+    section("a fallback never manufactures an overlap");
+    {
+        // The startup case, and the bug that shipped in 0.2.0. Hyprland brings
+        // monitors up one at a time, so mid-configuration two of them can share
+        // a logical rect. Overlapping rects are adjacent on no axis, so the
+        // second monitor cannot attach to anything and falls back — and the
+        // fallback converts a logical offset of zero, landing it exactly on the
+        // root. The caller then refuses the layout it was handed and tells the
+        // user to check a config keyword they never wrote.
+        BuildDiagnostics d;
+        const Layout     l = buildLayout({square("A", 0, 0), square("B", 0, 0)}, {}, &d);
+
+        check(l.monitors().size() == 2, "both monitors are still placed");
+        check(!l.firstMMOverlap().has_value(), "identical logical rects do not produce overlapping mm rects");
+        check(!d.warnings.empty(), "and the guess is reported rather than made silently");
+
+        // Parked clear of everything, not stacked on the root.
+        originIs(l, "A", 0, 0, "the root is where it always was");
+        originIs(l, "B", 500, 0, "the unplaceable one is parked past the right edge");
+
+        // Three-way: each fallback must clear the ones before it too.
+        const Layout three = buildLayout({square("A", 0, 0), square("B", 0, 0), square("C", 0, 0)});
+        check(!three.firstMMOverlap().has_value(), "three coincident monitors still do not overlap");
+        check(three.monitors().size() == 3, "and none of them is dropped");
+
+        // The gap is honoured when parking, same as any other seam.
+        BuildOptions g;
+        g.gapMM = 10.0;
+        originIs(buildLayout({square("A", 0, 0), square("B", 0, 0)}, g), "B", 510, 0, "the parked monitor respects gap_mm");
+
+        // A genuinely disconnected island whose converted position happens to
+        // land on another panel must also be pushed clear rather than stacked.
+        BuildDiagnostics d2;
+        const Layout     island = buildLayout({square("A", 0, 0), square("B", 1000, 0), mon("C", Rect{200, 200, 1000, 1000}, 500, 500)}, {}, &d2);
+        check(!island.firstMMOverlap().has_value(), "an island landing on a panel is moved off it");
+    }
+
     section("diagnostics describe how each monitor got there");
     {
         BuildDiagnostics d;

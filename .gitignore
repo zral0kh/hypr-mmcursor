@@ -12,11 +12,15 @@ test/vpointer/vpointer
 test/vpointer/*-protocol.c
 test/vpointer/*-client-protocol.h
 
+# Generated inside the VM by verify-autoload.sh from test/vm/hyprland.conf.
+test/vm/hyprland-autoload.conf
+
 # Editor / tooling
 compile_commands.json
 .cache/
 
-# Maintainer-local notes. Release process and anything else that is our problem
-# rather than a user's does not belong in the published repo.
+# Maintainer-local notes. Prose about how we work is not a user's problem.
+# Tooling is different — scripts/release.sh is tracked, the same way a CI
+# workflow would be.
 RELEASING.md
 NOTES.local.md
