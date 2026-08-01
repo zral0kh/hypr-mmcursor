@@ -757,10 +757,11 @@ truth.
 There is no `--version` flag, and that is deliberate. `PLUGIN_DESCRIPTION_INFO`
 is the plugin API's *own* version field and `hyprctl plugin list` already prints
 it, so inventing a second convention would only create somewhere else to forget
-to bump. That field and the `version` subcommand read the same string, stamped by
-the Makefile from `./VERSION` plus the commit — see "Versioning and releases" in
-[README.md](README.md). The dump repeats it on its first line, so a pasted dump
-identifies itself without anyone having to ask which build it came from.
+to bump. That field and the `version` subcommand read one string, stamped by the
+Makefile from `./VERSION` plus the commit — there is no version literal in the
+source, because a second number is the thing that drifts. The dump repeats it on
+its first line, so a pasted dump identifies itself without anyone having to ask
+which build it came from.
 
 ### [`PLUGIN_EXIT`](src/plugin.cpp#L583-L592)
 

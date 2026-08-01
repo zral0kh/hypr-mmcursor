@@ -38,29 +38,26 @@ test:
 # Verified working against 0.56.0 built with GCC 16.1.1. `make check-toolchain`
 # tells you if that stopped being true before you spend time on a crash.
 # ---------------------------------------------------------------------------
+
 # ---------------------------------------------------------------------------
 # Versioning.
 #
-# See the ./VERSION file is the single source of truth. 
-# Let all other sources derive from that
+# ./VERSION is the single source of truth; everything else derives from it, so
+# there is no second number anywhere to drift out of sync.
 #
-# Releasing:
-#     edit VERSION  ->  commit  ->  git tag v$(cat VERSION)  ->  git push --tags
+# A build made from a release reports the bare version; one made from a working
+# tree appends the commit, because the second-most-common real failure after
+# "stale .so following a Hyprland upgrade" is "the rebuild did not actually
+# happen" — and both are then answerable from the running compositor instead of
+# by comparing file timestamps.
 #
-# `check-version` refuses to build a tagged commit whose tag disagrees, so the
-# mistake is caught at the moment it would ship rather than after.
-#
-# Off-tag builds append the commit, because the second-most-common real failure
-# after "stale .so following a Hyprland upgrade" is "the rebuild did not
-# actually happen" — and both are then answerable from the running compositor
-# instead of by comparing file timestamps.
-#
-#     on tag v0.2.0, clean    ->  0.2.0
-#     three commits on, dirty ->  0.2.0+7be5c2f-dirty
-#     tarball, no .git        ->  0.2.0
+#     on the release tag, clean  ->  0.2.0
+#     three commits on, dirty    ->  0.2.0+7be5c2f-dirty
+#     tarball, no .git           ->  0.2.0
 #
 # `make vm-verify` ships the tree by tar, with no .git, so that last case is not
 # theoretical. Never make a missing git a hard failure.
+# ---------------------------------------------------------------------------
 VERSION_BASE := $(shell cat VERSION 2>/dev/null || echo unknown)
 GIT_EXACT    := $(shell git describe --exact-match --tags 2>/dev/null)
 GIT_REV      := $(shell git describe --always --dirty --exclude '*' 2>/dev/null)
@@ -80,8 +77,7 @@ check-version:
 	@t="$(GIT_EXACT)"; v="$(VERSION_BASE)"; \
 	if [ -n "$$t" ] && [ "$$t" != "v$$v" ]; then \
 		echo "ERROR: ./VERSION says $$v but HEAD is tagged $$t."; \
-		echo "       These must match — the tag is what GitHub publishes as a release."; \
-		echo "       Fix ./VERSION, or retag:  git tag -f v$$v"; \
+		echo "       These must match. Correct ./VERSION, or move the tag."; \
 		exit 1; \
 	fi
 

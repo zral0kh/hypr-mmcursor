@@ -15,3 +15,8 @@ test/vpointer/*-client-protocol.h
 # Editor / tooling
 compile_commands.json
 .cache/
+
+# Maintainer-local notes. Release process and anything else that is our problem
+# rather than a user's does not belong in the published repo.
+RELEASING.md
+NOTES.local.md

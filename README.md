@@ -183,8 +183,7 @@ test/vm/verify-placement.sh  68 more: every layout, override and edge case,
 test/vpointer/               Feeds real relative motion via wlr-virtual-pointer.
 test/nested.conf             Alternative to the VM: a nested-session config.
 
-VERSION                      The release number. Single source of truth; the git
-                             tag and the reported version both derive from it.
+VERSION                      The version number. Everything else derives from it.
 README.md                    This file — the design, and why it is shaped this way.
 ROADMAP.md                   What is left to do, plus the facts worth not
                              rediscovering (hook site, the two glue bugs, why
@@ -416,45 +415,21 @@ and while autoloaded, on every login. Recovery is a TTY (`Ctrl+Alt+F3`) and
 commenting out the `plugin` line. That is why you load it by hand and use it for a
 while before putting it in the config, not the other way round.
 
-### Versioning and releases
+### Versioning
 
-`./VERSION` is the **single source of truth**. The git tag, the GitHub release
-and what the plugin reports all come from it, so there is exactly one number in
-the repo to bump and nothing that can quietly drift out of sync.
+Semantic versioning, with build provenance appended when the build did not come
+from a release tag:
 
-```sh
-$EDITOR VERSION            # 0.2.0
-git commit -am "release 0.2.0"
-git tag v0.2.0
-git push --tags
+```
+0.2.0                 # release build
+0.2.0+7be5c2f-dirty   # built from a working tree, at that commit
 ```
 
-`make plugin` runs `check-version`, which **refuses to build a tagged commit
-whose tag disagrees with `./VERSION`** — so the mistake is caught at the moment
-it would ship, not after the release is published. Untagged commits are ordinary
-development and are left alone.
-
-Off-tag builds append the commit, because the version answers two different
-questions and both matter:
-
-| built | reports |
-|---|---|
-| on tag `v0.2.0`, clean tree | `0.2.0` |
-| three commits later, dirty | `0.2.0+7be5c2f-dirty` |
-| source tarball, no `.git` | `0.2.0` |
-
-The second row is the useful one. After a post-update hook rebuilds the plugin
-for you, "is the loaded `.so` actually built from my current tree" stops being a
-question about file timestamps:
-
-```sh
-hyprctl mmcursor version   # mmcursor 0.2.0+7be5c2f-dirty  (built against 36b2e0c…)
-hyprctl plugin list        # the same version, via the plugin API's own field
-```
-
-There is deliberately **no version literal in the source** — a second number in
-`plugin.cpp` is precisely the thing that drifts from the tag and makes a GitHub
-release disagree with what the plugin reports.
+`hyprctl mmcursor version` and `hyprctl plugin list` both report it, alongside
+the Hyprland ABI it was compiled against. The suffix is the useful part: it tells
+you whether the loaded `.so` matches your current source, which is otherwise a
+question about file timestamps — and it is exactly what you want to check after
+the post-update hook below rebuilds it for you.
 
 ### Rebuild after every Hyprland update
 
