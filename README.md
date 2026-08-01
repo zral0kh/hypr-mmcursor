@@ -1,675 +1,353 @@
 # mmcursor
 
 A Hyprland plugin that moves the cursor through **physical space** instead of
-logical pixel space.
+logical pixel space, so the pointer does not jump when it crosses between
+monitors of different pixel density.
 
 ## The problem
 
-Hyprland positions monitors by rigid offsets in logical pixels. When two panels
-have different pixel densities, logical space and physical space only agree at
-the single point where you aligned them. Everywhere else they diverge, and the
-cursor jumps when it crosses the seam.
+Hyprland positions monitors by offsets in logical pixels. Two panels of
+different density agree with physical reality at exactly one point — wherever
+you aligned them — and diverge everywhere else.
 
-Concretely, on the desk this was written for:
-
-| | resolution | physical | density along the seam |
+| | resolution | physical | density |
 |---|---|---|---|
 | Main | 2560×1440 | 600×340 mm | 4.235 px/mm |
-| Secondary | 1080×1920 | 300×530 mm | 3.623 px/mm |
+| Secondary (rotated) | 1080×1920 | 300×530 mm | 3.623 px/mm |
 
-Physically centred on the same horizon, `auto-center-right` makes the centre
-seamless and everything else wrong. At the top edge of Main the cursor lands
-**28.75 mm** away from where your hand says it should. There is a test asserting
-exactly that number, because it is the thing this plugin exists to delete.
+Centred on one horizon, `auto-center-right` makes the middle of the seam
+seamless and everything else wrong. At the top edge the cursor lands **28.75 mm**
+from where your hand expects.
 
-## The model
+## How it works
 
-Millimetres are the ground truth. Logical pixels are a projection.
-
-```
-                 relative input delta
-                          │
-                          ▼
-              mm accumulator (canonical)
-                          │
-                clamp to union of panels
-                          │
-                          ▼
-        per-monitor affine projection → logical px
-                          │
-                          ▼
-                     compositor
-```
-
-Per monitor the projection is a plain affine map between two known rectangles:
+Millimetres are canonical; logical pixels are a projection.
 
 ```
-logical = M.logical_origin + (p_mm − M.mm_origin) × (M.logical_size / M.mm_size)
+input delta → mm accumulator → clamp to the panels' union → affine map → logical px
 ```
 
-No warping, no special-casing the seam, no correction term. The seam problem
-does not get fixed so much as it stops being expressible.
-
-### Why the config is in millimetres
-
-Because that is the unit the hardware already emits. EDID carries the panel's
-physical size, Hyprland surfaces it as `physical size (mm)`, and it is the only
-number in the system that describes the real world. "How far apart are my
-monitors vertically, in mm" is answerable with a tape measure. The logical-pixel
-equivalent is only answerable by recomputing it every time a scale changes.
-
-### Four invariants worth not breaking
-
-**Never mutate the delta.** Consume it to advance the mm accumulator; leave the
-event's own delta untouched. This is what keeps the blast radius correct.
-`zwp_relative_pointer_v1` does not derive from cursor position — it carries
-deltas — so a pointer-locked game is unaffected *by construction*, not because
-anything special-cased it. Rescale the delta in place and you corrupt every
-relative-pointer client at once. `applyRelative()` takes a delta and returns a
-position precisely so this is hard to get wrong; it is exactly the kind of
-indirection a later refactor will helpfully "simplify" into a bug.
-
-The interposition point is one arrow: **delta → new global cursor position**.
-Everything downstream derives from global position and inherits the correction
-for free — surface-local `wl_pointer.motion`, hit testing, focus, drag tracking.
-None of it needs to know millimetres exist.
-
-One honest exception, since a global position is a single *point*: what inherits
-the correction is the hotspot. The cursor *bitmap* is drawn once per monitor it
-overlaps, each from that monitor's own still-logical origin, so while the image
-straddles a seam its two halves do not line up. Confirmed on hardware, cosmetic,
-and out of scope by construction — see "Known limits".
-
-**mm is the only accumulator.** Never round-trip mm → logical → mm on the fast
-path. Logical is lossy and the error compounds until the two spaces silently
-disagree.
-
-**Clamp the accumulator, not just the projection.** If mm is allowed to drift
-into dead space while the cursor sits visually parked at an edge, coming back
-lands you somewhere else. That is the hysteresis this design exists to avoid.
-`clampMM` is idempotent; there is a test for it and a test for the walk-back
-case.
-
-**Absolute moves must be reconciled — by pulling, not pushing.** Relative motion
-is not the only thing that moves a Wayland cursor. `hyprctl dispatch movecursor`,
-tablets, touch, pointer-lock handoff when a game grabs or releases, and
-client-side warps all set a logical position directly. Skip this and everything
-works fine until you alt-tab out of a fullscreen game.
-
-The tempting fix is to hook each of those and push `reconcile()` from them. Don't:
-that enumeration can never be proven complete, and it forces an mm → logical → mm
-round-trip onto the fast path. Instead compare the cursor against the position
-read back after our *own* last write. If it differs, something else moved it. One
-comparison, no flag to forget, and it covers paths added in future Hyprland
-releases without naming any of them.
-
-Two consequences worth knowing. The comparison must be against a **readback**,
-never the position we requested — the compositor clamps what we hand it, so
-comparing against the request reports a phantom external move near every edge. And
-reconcile is therefore **lazy**: it happens on the next relative event, so
-`hyprctl mmcursor` will show `(external move pending reconcile)` in between. That
-is the mechanism working.
-
-### Where the desk layout comes from
-
-The mm layout is **derived from the arrangement Hyprland actually has active** —
-each monitor's `m_position` / `m_size` — so `auto`, `auto-center-right`,
-hand-written offsets, rotations and scales all arrive already resolved and no
-monitor rule ever has to be parsed.
-
-The subtlety, and the reason this is not a coordinate conversion: a logical
-offset cannot be turned into millimetres by dividing by a density, because the
-two panels have different densities and the offset spans both. Secondary sits at
-logical `y = -240` against Main's 1440px/340mm; dividing gives 56.7mm. The
-physically true answer is 95mm.
-
-What the logical layout expresses is a **relation**. Both centres sit at logical
-`y = 720` — "centred" — and reproducing that relation physically gives exactly
-−95. So for each seam the builder asks which of three relations the arrangement
-states (near edges flush, far edges flush, or centres flush), takes the closest,
-reproduces it exactly in mm, and converts only the leftover residual through the
-anchor's density. An exactly-stated relation converts exactly; anything in
-between degrades continuously. There is no tolerance knob.
-
-Monitors are attached to each other by a spanning tree over logical adjacency,
-cheapest seam first, so vertical stacks, L-shapes and grids all work and the
-result never depends on the order monitors were declared in. Every one of those
-placements is reported by `hyprctl mmcursor`:
+Per monitor the map is between two known rectangles:
 
 ```
-Virtual-1  mm [   0.00    0.00   600.00x340.00]  …  <- root
-Virtual-2  mm [ 600.00  -95.00   300.00x530.00]  …  <- right-of centre Virtual-1
+logical = origin + (p_mm − mm_origin) × (logical_size / mm_size)
 ```
 
-`mmcursor-place` overrides any of it, either absolutely or as a relation. See
-**Config**.
+There is no seam correction anywhere in the code. Panels adjacent on the desk
+are adjacent in mm, so the discontinuity stops being expressible.
 
-### Bezel gaps
+The desk layout is derived from the arrangement Hyprland already has active, so
+`auto`, `auto-center-right`, rotations and scales all just work. Physical sizes
+come from EDID.
 
-`gap_mm` defaults to `0.0`, which makes panels edge-adjacent in mm space even
-though real bezels exist. That is a deliberate lie: the honest alternative is a
-dead zone where the cursor is "in the bezel" and visibly stalls. Set it to a
-real measurement if you would rather have physical honesty, or `mmcursor-gap`
-per seam, since bezels differ between pairs.
+## Install
 
-Collapsing at build time rather than special-casing gaps at projection time is
-what keeps `clampMM` idempotent.
-
-## Layout
-
-```
-src/geometry.hpp/.cpp        Rect, projection, clamping.       No Hyprland deps.
-src/layout_build.hpp/.cpp    Active layout → desk layout.      No Hyprland deps.
-src/cursor_state.hpp/.cpp    The mm accumulator.               No Hyprland deps.
-src/apply.hpp                Reconcile + correct decision.     No Hyprland deps.
-src/plugin.cpp               Hyprland glue. The only file with a hyprland #include.
-
-tests/test_geometry.cpp         81 checks — the pieces compute what they claim.
-tests/test_model.cpp        60,569 checks — the headline properties, and a
-                                           differential vs stock behaviour.
-tests/test_placement.cpp       402 checks — the desk derived from every
-                                           arrangement, and every override.
-tests/test_apply.cpp        15,628 checks — the hook's logic against a
-                                           simulated, adversarial compositor.
-
-test/vm/run.sh               Arch VM: fetch, seed, boot, provision.
-test/vm/hyprland.conf        Reproduces this desk on two virtual heads.
-test/vm/restart-and-load.sh  Restart + load + triage a crash, inside the VM.
-test/vm/user-data.in         cloud-init template; `run.sh seed` fills it in.
-test/vm/lib.sh               Shared hyprctl helpers for the two verify scripts.
-test/vm/verify.sh            20 assertions on one desk, inside a compositor.
-test/vm/verify-placement.sh  68 more: every layout, override and edge case,
-                             each one written to hyprland.conf and reloaded.
-test/vpointer/               Feeds real relative motion via wlr-virtual-pointer.
-test/nested.conf             Alternative to the VM: a nested-session config.
-
-VERSION                      The version number. Everything else derives from it.
-README.md                    This file — the design, and why it is shaped this way.
-ROADMAP.md                   What is left to do, plus the facts worth not
-                             rediscovering (hook site, the two glue bugs, why
-                             headless is impossible).
-CLAUDE.md                    Rules for agentic sessions on this repo.
-```
-
-The split is the point. Everything that can be logically wrong lives outside
-`plugin.cpp` and is covered by tests. When `plugin.cpp` breaks on a Hyprland
-update — and it will — the fix stays confined to that file.
-
-`apply.hpp` exists because of that rule rather than in spite of it. The logic
-deciding when to adopt an external cursor position and what corrected delta to
-return is the most error-prone code here, and while it lived in `plugin.cpp`
-nothing could test it. So it moved, and `plugin.cpp` was reduced to reading two
-values, calling `planMotion`, and writing the result back.
-
-## Status
-
-Verified against **Hyprland 0.56.0** (the current Arch/Omarchy package) and
-cross-checked against 0.56.1. Both compile and pass.
-
-The core is written and tested — 76,680 checks, no compositor needed, mutation
-tested. `src/plugin.cpp` is written, builds clean, and every Hyprland touchpoint
-carries the source location that establishes it.
-
-**It runs.** In the test VM it passes 88 scripted assertions driven through the
-real relative-pointer path (`make vm-up && make vm-verify`). The headline result:
-identical 47.05mm of physical travel moves the cursor 199 logical px on one panel
-and 170 on the other, and purely horizontal input produces zero physical vertical
-drift across the seam while logical y moves by the predicted 104.15px.
-
-Those assertions cover more than one desk. `verify-placement.sh` rewrites
-`hyprland.conf` and reloads for each of: centred, top-aligned and bottom-aligned
-side-by-side pairs; a deliberate logical gap; a vertical stack, crossed in both
-directions; a three-monitor L built on a headless output; a mirrored monitor; a
-panel at scale 2; every config override; deleting a config line and confirming
-its effect actually goes away; the `hyprctl` subcommands; and the refusals —
-overlapping mm rects, and a hotplugged output with no physical size.
-
-**And it works on the real desk.** Loaded on the Main/Secondary hardware, ordinary
-movement, crossing between panels and hammering the outer boundaries all behave
-correctly. Edge hammering is the interesting one: it is where an mm accumulator
-that had drifted outside the clamped region would surface as hysteresis, and it
-doesn't. That run also exercises the EDID *read* path, which every VM test had
-bypassed — virtual outputs have no usable EDID, so all of them went through the
-`mmcursor-monitor` override branch instead.
-
-Not yet put under load — none of it known-broken, just unverified: pointer-locked
-games, tablet and touch, and DPMS. Scale ≠ 1 and hotplug are now covered in the
-VM but not on real hardware. See `ROADMAP.md` item 1.
-
-### The hook site
-
-`Pointer::CPointerManager::move(const Vector2D&)`. Three things make it the right
-one:
-
-It receives a pure logical delta — the arrow, and nothing else.
-
-It sits **downstream of relative-pointer dispatch**. In `onMouseMoved`,
-`sendRelativeMotion` runs at `InputManager.cpp:154` and `Pointer::mgr()->move()`
-at `:155`. So pointer-locked clients have already been handed the untouched
-libinput delta before we are called: the "never mutate the delta" invariant holds
-*by construction*, not because anything here is careful. A game cannot see our
-correction even in principle.
-
-The delta is **accelerated** — `onMouseMoved` only picks `unaccel` under
-`input:force_no_accel` — so libinput's profile is already applied and our
-mm-per-unit constant is purely a speed knob.
-
-Contrast `CInputManager::mouseMoveUnified`, which hands you an absolute position
-Hyprland has *already* computed and *already* clamped. It has made the wrong
-cross-seam decision before you see it, and you would be reverse-engineering a
-delta to undo work just done. Get the delta, not the verdict.
-
-We do not warp directly. We rewrite the delta to `target - current` and call the
-original, whose own `newPos = current + delta` then reproduces `target` exactly —
-so the NaN guard, input-capture handling, clamping, damage and focus all still
-run. That parameter is not the event's delta; it is Hyprland's internal "advance
-the cursor by this much", and rewriting it *is* setting a position.
-
-### Why a function hook at all
-
-Hyprland's guidelines call function hooks a last resort and the easiest thing to
-break between versions. They're right, and there is no alternative here.
-`Event::bus()->m_events.input.mouse.move` is `Cancellable<Vector2D>` and looks
-perfect, but it emits `MOUSECOORDSFLOORED` — an absolute, *floored* position —
-from inside `mouseMoveUnified`. No event carries relative motion.
-
-(Note `HyprlandAPI::registerCallbackDynamic` is now a no-op returning `nullptr`;
-`Event::bus()` is the only working path for events.)
-
-Because the whole liability is concentrated in one four-line hook, that is also
-the strongest argument for upstreaming this instead — see `ROADMAP.md` item 4.
-
-## Config
-
-```
-plugin {
-    mmcursor {
-        enabled = true
-
-        sensitivity = 1.0
-        gap_mm      = 0.0
-
-        # derive (default) reads each seam's alignment out of the layout
-        # Hyprland has active. top/center/bottom force every seam instead,
-        # for when that layout is itself wrong.
-        align = derive
-
-        # name, native width mm, native height mm [, vertical offset mm]
-        # Sizes are in the panel's NATIVE orientation; rotation is applied
-        # for you. Use 0 to trust EDID.
-        mmcursor-monitor = Main,  600, 340
-        mmcursor-monitor = Secondary, 530, 300
-
-        # Placement is derived, so none of the rest is normally needed.
-        # Each line overrides that derivation.
-        mmcursor-place  = Secondary, at, 620, -95         # absolute mm origin
-        mmcursor-place  = DP-11, below, Main, left, 12 # edge, anchor, align, offset
-        mmcursor-gap    = Main, Secondary, 22             # this seam's bezel, mm
-        mmcursor-offset = Secondary, 0, -4                # 2D nudge, mm
-    }
-}
-```
-
-EDID physical sizes are wrong often enough that the override path is not
-optional. Yours look plausible — 600×340 and 530×300 are sane for a 27" and a
-24" — but do not trust the field in general, and headless outputs always report
-`0x0`.
-
-`mmcursor-place` takes either `NAME, at, x_mm, y_mm` or
-`NAME, right-of|left-of|above|below, ANCHOR [, align] [, offset_mm]`. Alignment
-is `derive` (default), `top`/`left`, `center`, or `bottom`/`right` — the two
-spellings are the same thing, named for whichever axis reads naturally at that
-seam. An absolute placement also makes that monitor the layout's root, which is
-how you pin pointer feel to a chosen panel.
-
-### Changing any of it
-
-**Nothing here requires rebuilding the plugin.** Hyprland watches
-`hyprland.conf` with inotify, so saving the file is enough: the reload
-re-parses the keywords and the plugin rebuilds its layout. Only a Hyprland
-*upgrade* needs `make plugin`, and the ABI guard turns a stale build into a
-clean refusal rather than a crash.
-
-Two escape hatches for the paths that do not emit a reload, and for tuning:
+Needs Hyprland **0.56.0 or 0.56.1**, x86_64, and a classic `hyprland.conf` (Lua
+configs cannot carry plugin keywords).
 
 ```sh
-hyprctl mmcursor                       # what the layout is and how it got there
-hyprctl mmcursor version               # which release and commit built this .so
-hyprctl mmcursor reload                # force a re-read (e.g. after hyprctl keyword)
-hyprctl mmcursor place  Secondary 620 -95  # try an origin, immediately
-hyprctl mmcursor offset Secondary 0 -4     # nudge, immediately
+sudo pacman -S --needed hyprland pkgconf binutils
+make plugin
 ```
 
-`place` and `offset` deliberately **do not persist** — the next config reload
-drops them. Positioning a monitor is a tape-measure job, and edit-save-reload
-for every 5mm is miserable; but `hyprland.conf` stays the single source of
-truth, so a tuning session cannot silently become your configuration.
+`binutils` is easy to miss and not optional: `findFunctionsByName` shells out to
+`nm`, so any hooking plugin fails to load without it. The plugin must also be
+built with the **same compiler as Hyprland** — the API passes C++ objects, so a
+mismatch crashes at load rather than failing to build. `make plugin` runs
+`check-toolchain` first and refuses on a mismatch.
 
-## Loading it on startup
+Try it before making it permanent:
 
-Once you have verified it by hand, make it permanent with the `plugin` keyword in
-`~/.config/hypr/hyprland.conf` — on Omarchy, the "add any other personal Hyprland
-configuration below" section at the bottom is the right place, since everything
-above it is sourced from `~/.local/share/omarchy/` and must not be edited.
+```sh
+hyprctl plugin load  $PWD/build/mmcursor.so
+hyprctl mmcursor
+hyprctl plugin unload $PWD/build/mmcursor.so
+```
+
+Then add to `~/.config/hypr/hyprland.conf` — on Omarchy, the personal section at
+the bottom:
 
 ```ini
-# mmcursor — cursor motion in physical mm across mismatched-density monitors
 plugin = /home/you/Projects/hypr-mmcursor/build/mmcursor.so
 ```
 
-Not `exec-once` in `autostart.conf`. `plugin` is a distinct keyword handled by
-`handlePlugin`; `exec-once` runs a program and would do nothing here.
+Three things to get right:
 
-### Use an absolute path — `plugin =` does not expand `~`
+- **Absolute path.** `plugin =` does not expand `~` (`source =` does), and the
+  resulting failure does **not** appear in `hyprctl configerrors` — the config
+  parsed fine, only the load failed.
+- **The same path everywhere.** The double-load guard compares path *strings*,
+  so two spellings of one file install two hooks and apply the correction twice.
+- **Not `exec-once`.** `plugin` is its own keyword.
 
-This is the one that costs you an afternoon, because the failure is quiet and the
-error appears in the wrong place.
+A clean `configerrors` does not mean it loaded. Check `hyprctl plugin list`.
 
-Hyprland stores the declared path **verbatim** (`handlePlugin`,
-`ConfigManager.cpp:1887-1895`) and hands it straight to `dlopen`
-(`PluginSystem.cpp:71-82`). Neither expands a tilde. So `plugin = ~/Projects/...`
-fails at *load* time with a notification, while `hyprctl configerrors` stays
-**clean** — because the config parsed perfectly; only the load failed. If you go
-looking for a config error you will not find one.
+### After a Hyprland upgrade
 
-What makes it easy to trip over is the asymmetry inside the same file: `source =`
-*does* expand `~`, because it globs the path with `GLOB_TILDE`
-(`ConfigManager.cpp:1816`). `plugin =` does not touch the string at all.
-
-### Use the *same* path everywhere
-
-Hyprland refuses to load a plugin twice by path string — `getPluginByPath`, then
-`"Cannot load a plugin twice!"`. But that check compares **strings**, so two
-different spellings of the same file slip past it. A second `pluginInit` then
-installs a **second hook** on `CPointerManager::move`, and the mm correction gets
-applied twice.
-
-So pick one canonical absolute path and use it for the config line *and* for any
-manual `hyprctl plugin load`. If you have been testing by hand, unload first:
-
-```sh
-hyprctl plugin unload /home/you/Projects/hypr-mmcursor/build/mmcursor.so
-```
-
-### Why autoloading is safe here
-
-Autoloading an input-path plugin sounds reckless. It is defensible on 0.56 because
-there are two independent layers underneath it, plus one of our own:
-
-1. `pluginInit` runs inside `setjmp` + try/catch (`PluginSystem.cpp:113-126`).
-   A **fatal signal** during init is caught and the plugin unloaded. Observed
-   working twice while this plugin was being developed — both crashes left the
-   compositor running.
-2. A config-declared plugin that fails to load logs an error, raises a
-   notification, and returns (`PluginSystem.cpp:226-233`). Startup continues.
-3. Our own ABI guard refuses to load against a different Hyprland build at all.
-
-Together those make the recurring real-world case — Hyprland gets updated, the ABI
-string changes, the stale `.so` no longer matches — degrade to **"no plugin, plus a
-notification"** rather than "no desktop". That is the whole reason the ABI guard
-exists.
-
-**The residual risk, stated plainly:** the `setjmp` only wraps *init*. A crash in
-the hook during ordinary motion is **not** caught and would take the session down —
-and while autoloaded, on every login. Recovery is a TTY (`Ctrl+Alt+F3`) and
-commenting out the `plugin` line. That is why you load it by hand and use it for a
-while before putting it in the config, not the other way round.
-
-### Versioning
-
-Semantic versioning, with build provenance appended when the build did not come
-from a release tag:
-
-```
-0.2.0                 # release build
-0.2.0+7be5c2f-dirty   # built from a working tree, at that commit
-```
-
-`hyprctl mmcursor version` and `hyprctl plugin list` both report it, alongside
-the Hyprland ABI it was compiled against. The suffix is the useful part: it tells
-you whether the loaded `.so` matches your current source, which is otherwise a
-question about file timestamps — and it is exactly what you want to check after
-the post-update hook below rebuilds it for you.
-
-### Rebuild after every Hyprland update
-
-Hyprland's plugin API has no ABI stability, so an update means the plugin stops
-loading until rebuilt. Nothing breaks; it just silently stops working, which is
-worse in its own way. On Omarchy the idiomatic fix is a post-update hook — drop an
-executable file (no `.sample` suffix) in `~/.config/omarchy/hooks/post-update.d/`:
+The plugin API has no ABI stability, so an upgrade means rebuilding. The ABI
+guard turns a stale build into a refusal plus a notification, not a crash. On
+Omarchy, drop this in `~/.config/omarchy/hooks/post-update.d/` (executable, no
+`.sample` suffix):
 
 ```bash
 #!/bin/bash
-# Rebuild mmcursor after a Hyprland upgrade; without this the ABI guard will
-# correctly refuse to load it. Takes effect at the next login, which is right:
-# the rebuilt plugin matches the NEW Hyprland, not the one still running.
 cd /home/you/Projects/hypr-mmcursor || exit 0
 make plugin || notify-send -u critical "mmcursor" "Rebuild failed — plugin will not load"
 ```
 
-`make plugin` runs `check-toolchain` first, so a compiler mismatch fails loudly
-here instead of crashing at load. If you also update with plain `pacman -Syu`, a
-`/etc/pacman.d/hooks/` hook on `Target = hyprland` catches every path, at the cost
-of needing root.
+It takes effect at the next login, which is correct: the rebuilt plugin matches
+the new Hyprland, not the one still running.
 
-After editing the config, validate:
+## Configure
 
-```sh
-hyprctl reload && hyprctl configerrors
+Usually nothing. Placement is derived and EDID is normally right.
+
+```
+plugin {
+    mmcursor {
+        enabled     = true
+        sensitivity = 1.0
+        gap_mm      = 0.0        # bezel between panels
+        align       = derive     # or top | center | bottom, forcing every seam
+
+        # Physical size override, NATIVE orientation — rotation is applied for
+        # you. Only needed when EDID lies; headless outputs always report 0x0.
+        mmcursor-monitor = Main, 600, 340
+
+        # Placement overrides. Rarely needed.
+        mmcursor-place  = Secondary, at, 620, -95
+        mmcursor-place  = Third, below, Main, left, 12
+        mmcursor-gap    = Main, Secondary, 22
+        mmcursor-offset = Secondary, 0, -4
+    }
+}
 ```
 
-Remember that a clean `configerrors` does **not** mean the plugin loaded — check
-`hyprctl plugin list` and `hyprctl mmcursor` for that.
+`mmcursor-place` takes `NAME, at, x_mm, y_mm` or
+`NAME, right-of|left-of|above|below, ANCHOR [, align] [, offset_mm]`. Alignment
+is `derive`, `top`/`left`, `center` or `bottom`/`right` — the two spellings are
+the same thing, named for whichever axis reads naturally. An absolute placement
+also makes that monitor the layout root, which is what sets pointer feel.
 
-## Dependencies
+Prefer `mmcursor-offset` over `mmcursor-place`: it corrects a derivation that is
+otherwise right, and survives a resolution change.
 
-Four separate sets, because they genuinely are separate — the whole point of the
-architecture is that the interesting half needs none of the heavy ones.
-
-**To run the unit tests: a C++23 compiler. That is the entire list.** No Hyprland,
-no headers, no compositor, no GPU. 76,680 checks in a couple of seconds.
+**Config changes never need a rebuild.** Hyprland watches `hyprland.conf`, so
+saving is enough.
 
 ```sh
-make test
+hyprctl mmcursor                        # layout, densities, how each panel was placed
+hyprctl mmcursor version                # release + commit + the ABI it was built for
+hyprctl mmcursor reload                 # force a re-read after `hyprctl keyword`
+hyprctl mmcursor place  Secondary 620 -95   # try a position, immediately
+hyprctl mmcursor offset Secondary 0 -4      # nudge, immediately
 ```
 
-**To build the plugin:**
+`place` and `offset` do not persist — positioning a monitor is a tape-measure
+job, and the next reload drops them, so a tuning session cannot silently become
+your configuration.
 
-| need | why |
-|---|---|
-| `hyprland` | Arch's package ships the headers at `/usr/include/hyprland` |
-| the **same compiler** Hyprland was built with | the plugin API passes C++ objects, so a mismatch crashes at load rather than failing to build. GCC 16.1.1 for Arch's 0.56.0. `make check-toolchain` refuses to proceed on a mismatch |
-| `pkgconf` | build flags, via `hyprland.pc` (pulls in pixman, libdrm, cairo, …) |
+Leave `cursor:hotspot_padding` at 0. It holds the cursor N px inside the layout
+while our clamp stops at the true edge, wasting up to N px when walking back off
+one. The plugin warns if you set it.
 
-**To *use* the plugin at runtime:**
+### Versioning
 
-| need | why |
-|---|---|
-| Hyprland with a **matching ABI string** | the plugin compares `__hyprland_api_get_hash()` against its own and refuses to load otherwise. Verified on 0.56.0 and 0.56.1 |
-| **`binutils`** | not optional and easy to miss: `HyprlandAPI::findFunctionsByName` shells out to `nm`, so *any* hooking plugin fails to resolve its target without it |
-| **x86_64** | Hyprland's function hooks are x86_64-only |
-| a classic **`hyprland.conf`** | plugin config *keywords* do not exist under a Lua config, so `mmcursor-monitor` would be unreadable. The plugin refuses to load rather than silently run on an uncorrectable EDID-only layout |
+Semantic versioning, with the commit appended when the build is not from a
+release tag:
 
-**To run the in-compositor tests** — host side:
-
-```sh
-sudo pacman -S --needed qemu-base cloud-image-utils
+```
+0.2.1                 # release build
+0.2.1+7be5c2f-dirty   # built from a working tree
 ```
 
-plus `curl`, `openssh`, `tar` and access to `/dev/kvm` (world-writable by
-default). Nothing else; no host Python, and no display.
+---
 
-Do not download the cloud image by hand — `make vm-up` fetches it into
-`build/vm/` and resizes it. A copy in the project root is ignored by git but
-wastes 555MB.
+# Design
 
-Guest side is provisioned automatically by `test/vm/user-data.in`:
-`hyprland seatd base-devel git binutils wayland python pkgconf`. Three of those
-were originally present only by luck — `binutils` and `wayland` via Hyprland's own
-dependencies, `python` via cloud-init — so they are named explicitly.
+## Four invariants
 
-Notably **not** needed: any `qemu-hw-display-virtio-*` package. `bochs-display`
-works, because `reopenDRMNode` takes a DRM lease on the primary node and the GBM
-allocator never needs a render node.
+**Never mutate the delta.** Consume it to advance the accumulator; leave the
+event's delta alone. `zwp_relative_pointer_v1` carries deltas rather than
+deriving them from position, so a pointer-locked game is unaffected *by
+construction*. `applyRelative()` takes a delta and returns a position precisely
+so this is hard to get wrong.
 
-## Building
+**mm is the only accumulator.** Never round-trip mm → logical → mm on the fast
+path; logical is lossy and the error compounds.
+
+**Clamp the accumulator, not just the projection.** Otherwise mm drifts into
+dead space while the cursor sits parked at an edge, and coming back lands
+somewhere else. `clampMM` is idempotent.
+
+**Reconcile absolute moves by pulling, not pushing.** Dispatchers, tablets,
+touch, pointer-lock handoff and client warps all set logical position directly.
+Hooking each of them cannot be proven complete and forces the lossy round-trip
+onto the fast path. Instead compare the cursor against the position read back
+after our *own* last write; if it differs, something else moved it.
+
+That comparison must be a **readback**, never the position we requested —
+`warpTo` runs positions through `closestValid`, so comparing against the request
+reports a phantom external move near every edge. Reconcile is therefore lazy:
+`hyprctl mmcursor` shows `(external move pending reconcile)` in between, which is
+the mechanism working.
+
+## Deriving the desk layout
+
+A logical offset cannot be converted to millimetres by dividing by a density,
+because the offset spans two panels with different ones. Secondary sits at
+logical `y = -240` against Main's 1440px/340mm; dividing gives 56.7 mm. The true
+answer is 95 mm.
+
+What the layout states is a *relation*: both centres sit at logical `y = 720`.
+Reproduce that physically and it is exact. So for each seam the builder takes
+the closest of three candidates — near edges flush, far edges flush, centres
+flush — reproduces it exactly in mm, and converts only the residual through the
+anchor's density. No tolerance knob.
+
+Monitors attach by a spanning tree over logical adjacency, cheapest seam first,
+so stacks, Ls and grids work and declaration order never matters. Every
+placement is reported:
+
+```
+Main       mm [   0.00    0.00  600.00x340.00]  …  <- root
+Secondary  mm [ 600.00  -95.00  300.00x530.00]  …  <- right-of centre Main
+```
+
+`gap_mm` defaults to 0, collapsing real bezels. That is a deliberate lie — the
+honest alternative is a dead zone where the cursor visibly stalls. Collapsing at
+build time rather than at projection time keeps `clampMM` idempotent.
+
+## The hook site
+
+`Pointer::CPointerManager::move(const Vector2D&)`. Three reasons:
+
+- It receives a pure logical delta — the arrow, and nothing else.
+- It is **downstream of relative-pointer dispatch**: `sendRelativeMotion` runs at
+  `InputManager.cpp:154`, `Pointer::mgr()->move()` at `:155`. Locked clients
+  already hold the untouched delta, so the invariant holds by construction.
+- The delta is already **accelerated**, so our constant is purely a speed knob.
+
+`mouseMoveUnified` would hand us an absolute position Hyprland has already
+computed and already clamped — the wrong cross-seam decision, already made.
+
+We do not warp. We rewrite the delta to `target - current` and call the
+original, whose `newPos = current + delta` reproduces `target` exactly, so its
+NaN guard, input-capture handling, clamping, damage and focus all still run.
+
+A function hook is a last resort and Hyprland says so. There is no alternative:
+`input.mouse.move` on the EventBus emits `MOUSECOORDSFLOORED`, an absolute
+floored position, and no event carries relative motion.
+(`registerCallbackDynamic` is a no-op returning `nullptr`; `Event::bus()` is the
+only working path.)
+
+Because the whole liability is one four-line hook, that is also the argument for
+upstreaming — `ROADMAP.md` item 4.
+
+## Repo layout
+
+```
+src/geometry.*        Rect, projection, clamping        no Hyprland deps
+src/layout_build.*    active layout → desk layout       no Hyprland deps
+src/cursor_state.*    the mm accumulator                no Hyprland deps
+src/apply.hpp         reconcile + correct decision      no Hyprland deps
+src/plugin.cpp        Hyprland glue — the only hyprland #include
+
+tests/test_geometry.cpp       81 checks
+tests/test_model.cpp      60,569 checks   properties, fuzz, differential vs stock
+tests/test_placement.cpp     402 checks   every arrangement and override
+tests/test_apply.cpp      15,628 checks   hook logic vs a simulated compositor
+
+test/vm/                  Arch VM: three in-compositor suites
+test/vpointer/            feeds real relative motion via wlr-virtual-pointer
+```
+
+Everything that can be logically wrong lives outside `plugin.cpp` and is tested
+without a compositor. When `plugin.cpp` breaks on a Hyprland update, the damage
+is contained to one file.
+
+## Testing
 
 ```sh
-make test             # compiler only, no Hyprland, ASan+UBSan, 4 suites
-make plugin           # needs Hyprland headers; checks the toolchain first
-make check-toolchain  # compare your compiler against Hyprland's
-
-make vm-up            # fetch, boot and provision the Arch test VM
-make vm-verify        # build inside it, load the plugin, run 88 assertions
+make test                      # 4 suites, compiler only, ASan+UBSan
+make plugin                    # needs Hyprland headers
+make vm-up && make vm-verify   # boot the Arch VM, run the in-compositor suites
 make vm-down
 ```
 
-## Artifacts and provenance
+The VM needs `qemu-base cloud-image-utils` and `/dev/kvm`; `make vm-up` fetches
+the image into `build/vm/`. Guest packages are provisioned by
+`test/vm/user-data.in`. `bochs-display` is enough — no
+`qemu-hw-display-virtio-*` needed.
 
-Nothing in this repo is generated-but-untracked, and nothing tracked is a binary
-you have to take on trust. A checkout plus the dependencies above reproduces
-everything. Verified by copying only the non-ignored files into an empty
-directory and building from scratch.
+Do not develop against your live session. Use the VM or a nested Hyprland, load
+by hand rather than autoloading, and keep a keyboard-only escape route: you are
+hooking the input path, so the plausible failure is "compositor alive, cursor
+unusable". `hyprctl output create headless` gives synthetic monitors with
+arbitrary density for seam testing.
 
-| artifact | produced by | tracked? |
-|---|---|---|
-| `build/test_geometry`, `build/test_model`, `build/test_apply` | `make test` | no |
-| `build/mmcursor.so` | `make plugin` | no |
-| `test/vpointer/vpointer` | `make -C test/vpointer` | no |
-| `test/vpointer/*-protocol.c`, `*-client-protocol.h` | `wayland-scanner`, from the vendored XML | no |
-| `build/vm/arch.qcow2` | `test/vm/run.sh fetch` | no |
-| `build/vm/seed.iso`, `build/vm/user-data` | `test/vm/run.sh seed`, from `test/vm/user-data.in` | no |
-| `build/vm/id_ed25519{,.pub}` | `test/vm/run.sh seed` — a throwaway keypair, generated so no personal key ends up in a disposable VM | no |
+## Status
 
-Two tracked files are copies of upstream material, so their origin is worth
-stating rather than leaving as mystery bytes:
+Verified against Hyprland 0.56.0 and 0.56.1.
 
-**`test/vpointer/wlr-virtual-pointer-unstable-v1.xml`** — vendored verbatim from
-the Hyprland source tree, `protocols/` directory, tag `v0.56.0`. This is *not*
-redundant: neither `/usr/share/hyprland/protocols` nor `/usr/share/wlr-protocols`
-exists on an Arch install, so there is nothing on the system to generate the
-client bindings from. `test/vpointer/Makefile` prefers a system copy if one ever
-appears and falls back to this one. To refresh it:
+- 76,692 unit checks, mutation tested, no compositor needed
+- 88 in-compositor assertions across three suites: one desk in detail, every
+  layout and override via `hyprland.conf` reloads, and the autoload startup path
+- Working on real hardware, including the EDID read path that VM tests bypass
 
-```sh
-curl -L https://raw.githubusercontent.com/hyprwm/Hyprland/v0.56.0/protocols/wlr-virtual-pointer-unstable-v1.xml \
-     -o test/vpointer/wlr-virtual-pointer-unstable-v1.xml
-```
+Measured: 47.05 mm of physical travel moves the cursor 199 logical px on one
+panel and 170 on the other, with zero physical vertical drift across the seam.
 
-**The Hyprland source, for re-checking the citations.** `src/plugin.cpp` cites
-specific lines (`PointerManager.cpp:831`, `InputManager.cpp:154`, and so on) as
-the evidence for each claim it makes about compositor internals. Those citations
-are only useful if you can open the files. Headers come with the `hyprland`
-package, but the `.cpp` files do not, so:
-
-```sh
-curl -L https://github.com/hyprwm/Hyprland/archive/refs/tags/v0.56.0.tar.gz | tar xz
-# aquamarine, for the allocator and headless-backend claims:
-curl -L https://github.com/hyprwm/aquamarine/archive/refs/tags/v0.14.0.tar.gz | tar xz
-```
-
-Deliberately not vendored — it is ~50MB, it is only needed when re-verifying, and
-a stale copy would be worse than none.
-
-## Testing safely
-
-Do not develop this against your live session.
-
-**Nested Hyprland.** Run a nested instance inside a window on your normal
-session and load the plugin there. A segfault kills the nest, not your desktop.
-This is the single most valuable safety measure and Hyprland's own plugin docs
-recommend it.
-
-**Headless outputs for the seam.** `hyprctl output create headless` gives you a
-synthetic monitor whose resolution, scale, position and transform you can set
-freely. Make two with deliberately mismatched densities and test crossings
-without touching real hardware. They report `physical size (mm): 0x0`, so you
-need the `mmcursor-monitor` override path working first — which you want
-anyway.
-
-**Never autoload during development.** Load with `hyprctl plugin load
-/path/to/mmcursor.so`. Hyprland does catch a crash during plugin init (see
-"Loading it on startup"), but it does *not* catch one in the hook afterwards — and
-a plugin listed in your config that dies on mouse movement means fixing it from a
-TTY, every login. Autoload once it is boring, not while you are changing it.
-
-**Keep an escape hatch.** Ctrl+Alt+F3, or SSH in from another machine. You are
-hooking the *input* path, so the plausible failure mode is "compositor alive,
-cursor unusable" — you want a keyboard-only way out.
-
-**Test the maths outside the compositor.** `make test` is 20 ms. Coordinate bugs
-found in a unit test cost nothing; the same bugs found by moving a mouse across
-a screen cost an afternoon.
+Unverified, not known-broken: pointer-locked games, tablet and touch, DPMS.
+Scale ≠ 1 and hotplug are covered in the VM but not on hardware.
 
 ## Known limits
 
-**The cursor *bitmap* straddling a seam still looks wrong, and cannot be fixed
-here.** Confirmed on real hardware: move the pointer so the cursor's body overlaps
-the seam while the hotspot is still on the first panel, and the two halves are
-visibly disjoint. As soon as the hotspot crosses, it snaps to correct.
+**The cursor bitmap straddling a seam looks disjoint** until the hotspot
+crosses. A global position is a single point — the hotspot — and it inherits the
+correction; the bitmap is drawn once per overlapping monitor from each one's
+still-logical origin. Cosmetic, bounded by the cursor's size, and the same class
+of artifact as a window straddling the seam at two scales. Fixing it means
+moving monitor placement itself into physical space, which is a compositor
+feature.
 
-That is the design working, not failing. The interposition point is one arrow —
-delta → global cursor position — and a position is a single point, the hotspot.
-Everything downstream inherits the correction *for that point*. The bitmap,
-though, is drawn once per monitor it overlaps, and each monitor places it from the
-global position using its own scale and logical origin. The monitors are still
-edge-adjacent in *logical* space, so the half drawn on one panel and the half drawn
-on the other do not line up physically.
+**Placement is axis-aligned and flat.** A panel tilted, or nearer to you than
+its neighbour, cannot be expressed.
 
-This is the same class of artifact as a window straddling the seam rendering at two
-different scales, and it is pre-existing. Fixing it means changing the monitors'
-logical placement, which changes window layout, workspace geometry and hit testing
-along with it — i.e. the compositor-level feature discussed in `ROADMAP.md` item 4,
-not something a plugin at this interposition point should attempt. It is bounded
-(at most the cursor's size, only while straddling) and purely cosmetic: the hotspot,
-which is what actually clicks, is correct throughout.
+**Pointer warps are adopted, not corrected.** A client asking for a specific
+logical pixel gets it; we only reconcile mm to match.
 
-If it bothers you, `cursor:hotspot_padding` is worth an experiment — Hyprland's
-clamp tests containment against a *single* monitor rect, so a non-zero padding
-should keep the cursor away from seams entirely and suppress the straddle. Note the
-tradeoff is real and measured: it reintroduces up to that many pixels of dead travel
-at every edge, which is the next limit.
-
-**`cursor:hotspot_padding` must be 0**, which is its default. It holds the cursor
-N logical px inside the layout, while our mm clamp stops at the true panel edge.
-mm then describes a position the cursor is not allowed to occupy, and walking back
-off an edge wastes up to N px — the exact hysteresis this project removes
-everywhere else. The plugin warns if you set it, and `test_apply.cpp` pins the
-bounded version (discrepancy ≤ padding, exactly zero at 0).
-
-Modelling Hyprland's padding geometry inside the core was rejected on purpose: it
-would couple the tested core to a compositor quirk, and Hyprland's own padding
-check tests containment against a *single* monitor rect, so it already creates
-dead zones at internal seams that have nothing to do with us.
-
-**binutils is a runtime dependency.** `findFunctionsByName` shells out to `nm` to
-resolve the hook target, so a plugin that hooks anything silently fails to load
-without it.
-
-**Build with the same compiler as Hyprland.** The plugin API passes C++ objects,
-so a mismatch crashes at load rather than failing to build. `make check-toolchain`
-compares your compiler against the one recorded in the Hyprland binary and
-refuses to proceed if they differ.
-
-
-Interactive window dragging should inherit the fix, since drag tracking is
-downstream of cursor position. What is *not* fixed is that a window straddling
-the seam renders at two different scales — but that is pre-existing and
-orthogonal to anything here.
-
-Pointer warps issued by clients or dispatchers are adopted, not corrected. If
-something asks for a specific logical pixel, it gets that pixel; we only
-reconcile our mm state to match. That is the right call — those callers mean
-logical coordinates.
-
-Placement is axis-aligned and flat. A panel physically rotated in a way
-`transform` does not describe, or one sitting closer to you than its neighbour,
-cannot be expressed — the affine map would stop being axis-aligned and `clampMM`
-would need rethinking. See `ROADMAP.md` item 2.
-
-Pointer moves fewer pixels per hand-inch on the lower-density panel. That is
-correct, and some people hate it.
+**The pointer moves fewer pixels per hand-inch on the lower-density panel.**
+That is the point, and some people dislike it.
 
 The union of differently-sized rectangles is not convex, so "nearest point in
-the union" can behave oddly at the outer corners. Harmless — those are screen
-corners you cannot move past anyway.
+the union" behaves oddly at outer corners — harmless, they are corners you
+cannot move past.
+
+## Provenance
+
+Nothing tracked is a binary you have to trust; a checkout plus the dependencies
+above reproduces everything.
+
+`test/vpointer/wlr-virtual-pointer-unstable-v1.xml` is vendored verbatim from
+Hyprland `v0.56.0`, because neither `/usr/share/hyprland/protocols` nor
+`/usr/share/wlr-protocols` exists on Arch and there is nothing on the system to
+generate bindings from. The Makefile prefers a system copy if one appears.
+
+`src/plugin.cpp` cites Hyprland source lines as evidence for each claim about
+compositor internals. The `.cpp` files are not in the `hyprland` package, so to
+re-check them:
+
+```sh
+curl -L https://github.com/hyprwm/Hyprland/archive/refs/tags/v0.56.0.tar.gz | tar xz
+curl -L https://github.com/hyprwm/aquamarine/archive/refs/tags/v0.14.0.tar.gz | tar xz
+```
+
+Not vendored — ~50 MB, only needed when re-verifying, and a stale copy would be
+worse than none.
+
+## See also
+
+`TUTORIAL.md` is a guided read of the whole plugin. `ROADMAP.md` has what is
+left plus a reference section of hard-won Hyprland facts. `CLAUDE.md` has the
+rules for working on it.
