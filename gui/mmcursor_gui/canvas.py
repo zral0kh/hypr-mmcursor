@@ -263,6 +263,10 @@ class MonitorCanvas(Gtk.DrawingArea):
         m = self._state.monitor(name)
         if not m:
             return True, True, True, True
+        if len(self._state.monitors) < 2:
+            # Nothing to be free RELATIVE TO — a single monitor has no anchor
+            # or neighbour, so an absolute nudge here wouldn't mean anything.
+            return False, False, False, False
         x, y, w, h = self._rect_for(m)
 
         x_bounded = False
