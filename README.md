@@ -260,6 +260,9 @@ tests/test_apply.cpp      15,628 checks   hook logic vs a simulated compositor
 
 test/vm/                  Arch VM: three in-compositor suites
 test/vpointer/            feeds real relative motion via wlr-virtual-pointer
+
+gui/                      mmcursor-gui — drag-to-arrange GTK4/libadwaita tool,
+                          a view over hyprctl -j mmcursor, see gui/README.md
 ```
 
 Everything that can be logically wrong lives outside `plugin.cpp` and is tested

@@ -158,9 +158,20 @@ Roughly in order:
       `hyprland.conf` stays the source of truth. Should emit `mmcursor-place`
       lines (absolute mm, since that's what a drag produces) rather than
       rewriting `monitor =` lines.
-- [ ] **The GUI itself.** `hyprtoolkit` is already present as a Hyprland dependency
-      and is the obvious fit; the alternative is anything that can draw rectangles
-      and shell out to `hyprctl`.
+- [~] **The GUI itself.** A working prototype exists at `gui/` —
+      `mmcursor-gui`, GTK4 + libadwaita, deliberately a separate Python
+      process talking only through `hyprctl`, not a Hyprland plugin: drag
+      monitors on an mm-space canvas with edge/centre snapping and per-edge
+      nudge arrows, live-previewed through `hyprctl mmcursor place` (so no
+      local geometry engine to disagree with `buildLayout`), a cursor-position
+      dot from `cursor.mm`, per-monitor placement diagnostics, and a save step
+      that writes only the monitors you actually touched to a GUI-owned
+      `~/.config/hypr/mmcursor-layout.conf` rather than touching
+      hyprland.conf. See `gui/README.md`. Verified end-to-end in the VM: the
+      JSON dump, live `place`, and the arrow-nudge round trip all confirmed
+      against a real rebuilt plugin, not a mock. Missing: a live setter for
+      `mmcursor-monitor`/`mmcursor-gap` (only place/offset have one), so
+      bezels and EDID-size overrides still need a config edit.
 
 The property to preserve: the GUI is a *view over the mm layout*, not a second
 source of truth. Everything it draws should come from the same `buildLayout` the
