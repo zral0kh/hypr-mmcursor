@@ -7,6 +7,7 @@ monitor hotplug just shows up on the next tick instead of needing a handler.
 
 from __future__ import annotations
 
+import signal
 from pathlib import Path
 
 import gi
@@ -43,6 +44,14 @@ class MmcursorGuiWindow(Adw.ApplicationWindow):
     def __init__(self, app: Adw.Application) -> None:
         super().__init__(application=app, title="mmcursor")
         self.set_default_size(1080, 680)
+
+        # A WM-initiated close (the X button, or a compositor keybind like
+        # Hyprland's killactive, which sends the same xdg_toplevel close
+        # request) should end the process, not just this window — there is
+        # nothing else for it to do once its one window is gone. Quitting
+        # explicitly here doesn't depend on GApplication's window-count
+        # bookkeeping actually reaching zero.
+        self.connect("close-request", self._on_close_request)
 
         self._dirty: dict[str, tuple[float, float]] = {}
         self._rows: dict[str, MonitorRow] = {}
@@ -217,6 +226,10 @@ class MmcursorGuiWindow(Adw.ApplicationWindow):
             self.banner.set_revealed(True)
         self._poll()
 
+    def _on_close_request(self, *_a) -> bool:
+        self.get_application().quit()
+        return False  # let GTK's own close handling (destroy the window) proceed too
+
 
 class MmcursorGuiApp(Adw.Application):
     def __init__(self) -> None:
@@ -229,4 +242,11 @@ class MmcursorGuiApp(Adw.Application):
 
 
 def main() -> int:
-    return MmcursorGuiApp().run(None)
+    app = MmcursorGuiApp()
+    # GLib's main loop is a C loop: plain `signal.signal()` handlers only run
+    # once control returns to the Python interpreter, which a blocking C
+    # poll() may never do — the classic "Ctrl+C does nothing" GTK symptom.
+    # unix_signal_add hooks the signal into the main loop itself instead.
+    GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, signal.SIGINT, app.quit)
+    GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, signal.SIGTERM, app.quit)
+    return app.run(None)
