@@ -143,15 +143,21 @@ speaks the right language — mm rectangles, not pixels.
 
 Roughly in order:
 
-- [ ] **Machine-readable state.** `hyprctl mmcursor` already prints the whole
-      layout, and `debugDump` already *receives* an `eHyprCtlOutputFormat` that it
-      currently ignores. Honouring it gives `hyprctl -j mmcursor` for near-free,
-      and that is the GUI's read side done.
-- [ ] **A runtime setter**, so the tool can preview a drag without rewriting
-      `hyprland.conf` and forcing a reload on every mouse move. A hyprctl command
-      taking a set of mm origins, applied through the same `buildLayout` path.
+- [x] **Machine-readable state.** `hyprctl -j mmcursor` now returns structured
+      JSON (`debugDumpJSON()` in `plugin.cpp`) — version, cursor mm/logical
+      position, and per-monitor mm/logical rects plus placement diagnostics
+      (`how`/`anchor`/`residualMM`), mirroring the text dump. `version`,
+      `reload`, `place` and `offset` all honour `-j` too.
+- [x] **A runtime setter** — turned out to already exist:
+      `hyprctl mmcursor place NAME X_MM Y_MM` / `offset NAME DX_MM DY_MM` sets
+      `g_liveOrigins`/`g_liveOffsets` and calls `rebuildLayout()` through the
+      same `buildLayout` path, without touching `hyprland.conf`. Cleared on the
+      next config reload, so a drag session can never silently become config.
+      This bullet was stale; the mechanism has been in `plugin.cpp` for a while.
 - [ ] **Config writeback** once a layout is accepted — the GUI proposes,
-      `hyprland.conf` stays the source of truth.
+      `hyprland.conf` stays the source of truth. Should emit `mmcursor-place`
+      lines (absolute mm, since that's what a drag produces) rather than
+      rewriting `monitor =` lines.
 - [ ] **The GUI itself.** `hyprtoolkit` is already present as a Hyprland dependency
       and is the obvious fit; the alternative is anything that can draw rectangles
       and shell out to `hyprctl`.

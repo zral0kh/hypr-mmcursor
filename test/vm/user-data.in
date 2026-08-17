@@ -36,6 +36,7 @@ packages:
   - wayland       # wayland-scanner + libwayland-client, for test/vpointer
   - python        # test/vm/verify.sh uses it for float comparisons
   - pkgconf       # pkg-config, for the plugin build flags
+  - nlohmann-json # header-only; `hyprctl -j mmcursor`'s JSON dump in plugin.cpp
 
 runcmd:
   # seatd rather than a full graphical logind session: fewer moving parts, and a

@@ -28,6 +28,8 @@
 #include <hyprland/src/state/MonitorState.hpp>
 #include <hyprland/src/output/Monitor.hpp>
 
+#include <nlohmann/json.hpp>
+
 #include <format>
 #include <optional>
 #include <string_view>
@@ -35,6 +37,8 @@
 #include <string>
 #include <unordered_map>
 #include <vector>
+
+using nlohmann::json;
 
 // Stamped by the Makefile, which derives it from ./VERSION plus the commit, so
 // a loaded plugin can say both which release it is and which source built it —
@@ -787,6 +791,70 @@ std::string debugDump() {
     return out;
 }
 
+// The JSON twin of debugDump(), for `hyprctl -j mmcursor` — this is the GUI's
+// read side. Same information, structured instead of formatted, so a client
+// does not have to parse the human-readable dump.
+//
+// Field names and shapes are deliberately close to the structs in
+// layout_build.hpp (mm/logical rects, placement diagnostics) rather than the
+// text layout above, since those are what the GUI actually needs and text
+// column widths are not part of the contract.
+json debugDumpJSON() {
+    json j;
+
+    j["version"]      = MMCURSOR_VERSION;
+    j["builtAgainst"] = g_builtAgainst;
+    j["enabled"]      = g_enabled;
+    j["mmPerUnit"]    = g_cursor.mmPerUnit();
+    j["sensitivity"]  = g_sensitivity;
+    j["gapMM"]        = g_gapMM;
+    j["align"]        = g_align == pcs::Align::Start ? "start" : (g_align == pcs::Align::End ? "end" : (g_align == pcs::Align::Center ? "center" : "derive"));
+
+    j["seamGaps"] = json::array();
+    for (const auto& g : g_seamGaps)
+        j["seamGaps"].push_back({{"a", g.a}, {"b", g.b}, {"mm", g.mm}});
+
+    j["rebuilds"]            = g_rebuilds;
+    j["deferred"]            = g_deferrals;
+    j["refused"]             = g_refusals;
+    j["pending"]             = g_pending;
+    j["liveOverrideActive"]  = !g_liveOrigins.empty() || !g_liveOffsets.empty();
+
+    j["monitors"] = json::array();
+    j["warnings"] = g_diag.warnings;
+
+    if (g_layout.empty()) {
+        j["layout"] = "empty";
+        return j;
+    }
+    j["layout"] = "active";
+
+    j["cursor"]           = json::object();
+    j["cursor"]["mm"]     = g_cursor.valid() ? json{{"x", g_cursor.positionMM().x}, {"y", g_cursor.positionMM().y}} : json(nullptr);
+    const auto POS        = Pointer::mgr()->position();
+    j["cursor"]["logical"] = json{{"x", POS.x}, {"y", POS.y}};
+    j["cursor"]["reconcilePending"] = POS != g_lastSeen;
+
+    for (const auto& m : g_layout.monitors()) {
+        json jm;
+        jm["name"]    = m.name;
+        jm["mm"]      = json{{"x", m.mm.x}, {"y", m.mm.y}, {"w", m.mm.w}, {"h", m.mm.h}};
+        jm["logical"] = json{{"x", m.logical.x}, {"y", m.logical.y}, {"w", m.logical.w}, {"h", m.logical.h}};
+        jm["pxPerMM"] = json{{"x", m.pxPerMMx()}, {"y", m.pxPerMMy()}};
+
+        for (const auto& p : g_diag.placements) {
+            if (p.name != m.name)
+                continue;
+            jm["placement"] = json{{"how", p.how}, {"anchor", p.anchor}, {"residualMM", json{{"x", p.residualMM.x}, {"y", p.residualMM.y}}}};
+            break;
+        }
+
+        j["monitors"].push_back(std::move(jm));
+    }
+
+    return j;
+}
+
 // `hyprctl mmcursor [reload | place NAME X Y | offset NAME DX DY]`
 //
 // reload exists because `hyprctl keyword` applies a single value without
@@ -794,7 +862,10 @@ std::string debugDump() {
 // exist because positioning a monitor is a tape-measure job: nudge, look,
 // nudge. They deliberately do not persist — hyprland.conf stays the source of
 // truth and the next reload drops them.
-std::string ctlCommand(eHyprCtlOutputFormat /*format*/, std::string args) {
+std::string ctlCommand(eHyprCtlOutputFormat format, std::string args) {
+    const bool WANT_JSON = format == eHyprCtlOutputFormat::FORMAT_JSON;
+    const auto DUMP       = [WANT_JSON]() -> std::string { return WANT_JSON ? debugDumpJSON().dump() : debugDump(); };
+
     // With exact=false the dispatcher may hand us the whole request, command
     // word and all. Drop a leading "mmcursor" so both forms parse the same.
     std::vector<std::string> tok;
@@ -810,18 +881,18 @@ std::string ctlCommand(eHyprCtlOutputFormat /*format*/, std::string args) {
         tok.erase(tok.begin());
 
     if (tok.empty())
-        return debugDump();
+        return DUMP();
 
     // For scripting. `hyprctl plugin list` is the idiomatic place to read a
     // plugin's version — this exists so a post-update hook can check what it
     // rebuilt without parsing that.
     if (tok[0] == "version")
-        return versionLine();
+        return WANT_JSON ? json{{"version", MMCURSOR_VERSION}, {"builtAgainst", g_builtAgainst}}.dump() : versionLine();
 
     if (tok[0] == "reload") {
         reloadConfigValues();
         rebuildLayout();
-        return "mmcursor: config re-read and layout rebuilt\n";
+        return WANT_JSON ? DUMP() : "mmcursor: config re-read and layout rebuilt\n";
     }
 
     const bool isPlace  = tok[0] == "place";
@@ -841,7 +912,7 @@ std::string ctlCommand(eHyprCtlOutputFormat /*format*/, std::string args) {
             g_liveOffsets[tok[1]] = pcs::Vec2{x, y};
 
         rebuildLayout();
-        return debugDump();
+        return DUMP();
     }
 
     return "usage: hyprctl mmcursor [version | reload | place NAME X_MM Y_MM | offset NAME DX_MM DY_MM]\n";

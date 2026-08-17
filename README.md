@@ -46,7 +46,7 @@ Needs Hyprland **0.56.0 or 0.56.1**, x86_64, and a classic `hyprland.conf` (Lua
 configs cannot carry plugin keywords).
 
 ```sh
-sudo pacman -S --needed hyprland pkgconf binutils
+sudo pacman -S --needed hyprland pkgconf binutils nlohmann-json
 make plugin
 ```
 
