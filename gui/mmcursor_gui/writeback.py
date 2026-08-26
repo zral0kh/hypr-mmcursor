@@ -35,6 +35,11 @@ _HEADER = (
 
 _PLACE_RE = re.compile(r"^\s*mmcursor-place\s*=\s*([^,]+),")
 
+# A purely cosmetic label for "whichever desk this file describes" — Hyprlang
+# never sees it (it's a comment), it's just so the GUI can show something
+# friendlier than a file path when you're setting up yet another environment.
+_NAME_RE = re.compile(r"^#\s*environment:\s*(.*\S)\s*$")
+
 
 def _existing_placements(path: Path) -> dict[str, str]:
     """name -> the full `mmcursor-place = ...` line text (no trailing newline)."""
@@ -48,14 +53,30 @@ def _existing_placements(path: Path) -> dict[str, str]:
     return out
 
 
-def save_placements(moved: dict[str, tuple[float, float]], path: Path = DEFAULT_PATH) -> Path:
+def read_environment_name(path: Path = DEFAULT_PATH) -> str:
+    if not path.exists():
+        return ""
+    for line in path.read_text().splitlines():
+        m = _NAME_RE.match(line)
+        if m:
+            return m.group(1)
+    return ""
+
+
+def save_placements(moved: dict[str, tuple[float, float]], path: Path = DEFAULT_PATH, environment_name: str = "") -> Path:
     """moved: {monitor_name: (x_mm, y_mm)} for monitors dragged this session."""
     lines = _existing_placements(path)
     for name, (x, y) in moved.items():
         lines[name] = f"mmcursor-place = {name}, at, {x:.2f}, {y:.2f}"
 
+    if not environment_name:
+        environment_name = read_environment_name(path)
+
     path.parent.mkdir(parents=True, exist_ok=True)
-    body = _HEADER.format(path=path) + "\nplugin {\n    mmcursor {\n"
+    body = _HEADER.format(path=path)
+    if environment_name:
+        body += f"# environment: {environment_name}\n"
+    body += "\nplugin {\n    mmcursor {\n"
     for name in sorted(lines):
         body += f"        {lines[name]}\n"
     body += "    }\n}\n"

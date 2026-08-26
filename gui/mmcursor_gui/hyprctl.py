@@ -49,6 +49,17 @@ class MonitorState:
     px_per_mm_y: float
     placed_how: str
     placed_anchor: str
+    description: str
+    make: str
+    model: str
+    serial: str
+
+    @property
+    def display_name(self) -> str:
+        """The EDID description ("Dell U2720Q") when there is one — useful
+        for recognising unfamiliar hardware while setting up a new desk —
+        falling back to the Hyprland port name ("DP-9") otherwise."""
+        return self.description or self.name
 
 
 @dataclass(frozen=True)
@@ -108,6 +119,10 @@ def get_state() -> MmcursorState:
                 px_per_mm_x=m["pxPerMM"]["x"], px_per_mm_y=m["pxPerMM"]["y"],
                 placed_how=placement.get("how", ""),
                 placed_anchor=placement.get("anchor", ""),
+                description=m.get("description", ""),
+                make=m.get("make", ""),
+                model=m.get("model", ""),
+                serial=m.get("serial", ""),
             )
         )
 

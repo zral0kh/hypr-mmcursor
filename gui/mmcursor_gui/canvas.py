@@ -540,17 +540,27 @@ class MonitorCanvas(Gtk.DrawingArea):
         cr.select_font_face("sans-serif")
         cr.set_font_size(15)
         cr.move_to(sx0 + 14, sy0 + 26)
-        cr.show_text(m.name)
+        cr.show_text(m.display_name)
 
         cr.set_source_rgb(*_TEXT_DIM)
         cr.set_font_size(12)
-        cr.move_to(sx0 + 14, sy0 + 45)
+        line = sy0 + 45
+        if m.description:
+            # display_name is already the description; show the Hyprland
+            # port name too, since that's what mmcursor-place/-gap/-offset
+            # in hyprland.conf actually key on.
+            cr.move_to(sx0 + 14, line)
+            cr.show_text(m.name)
+            line += 16
+        cr.move_to(sx0 + 14, line)
         cr.show_text(f"{w:.0f} x {h:.0f} mm")
-        cr.move_to(sx0 + 14, sy0 + 61)
+        line += 16
+        cr.move_to(sx0 + 14, line)
         cr.show_text(f"{m.px_per_mm_x:.2f} px/mm")
         if m.placed_how:
             label = m.placed_how if not m.placed_anchor else f"{m.placed_how} {m.placed_anchor}"
-            cr.move_to(sx0 + 14, sy0 + 77)
+            line += 16
+            cr.move_to(sx0 + 14, line)
             cr.show_text(label)
         cr.restore()
 

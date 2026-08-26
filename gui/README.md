@@ -27,12 +27,58 @@ rebuild through that same path (`hyprctl mmcursor place`). See
 ./mmcursor-gui
 ```
 
+## Installing a launcher (Omarchy / Hyprland)
+
+Three independent, standard pieces — none of them touch Omarchy's own
+files under `~/.local/share/omarchy/`, which are managed by `omarchy update`
+and shouldn't be hand-edited:
+
+1. **A command on PATH.** Symlink the entry point into `~/.local/bin` (already
+   on PATH on Omarchy):
+
+   ```sh
+   ln -s "$(pwd)/mmcursor-gui" ~/.local/bin/mmcursor-gui
+   ```
+
+2. **An app-launcher entry**, so `SUPER+Space` (walker) finds it by name.
+   Create `~/.local/share/applications/mmcursor-gui.desktop`:
+
+   ```ini
+   [Desktop Entry]
+   Type=Application
+   Name=mmcursor
+   Comment=Drag-to-arrange the physical monitor layout mmcursor uses
+   Exec=mmcursor-gui
+   Terminal=false
+   Categories=Settings;HardwareSettings;
+   ```
+
+3. **A keybinding**, in `~/.config/hypr/bindings.conf`:
+
+   ```
+   bind = SUPER CTRL, M, exec, mmcursor-gui
+   ```
+
+Why not Omarchy's own `Setup → Monitors` menu item? It's hardcoded inside
+`~/.local/share/omarchy/bin/omarchy-menu` (`open_in_editor
+~/.config/hypr/monitors.conf`) — that file is Omarchy source, not user
+config, and editing it directly gets silently reverted (or conflicts) on the
+next `omarchy update`. The keybinding above is the supported equivalent.
+
 ## What it does
 
 - **Canvas** — every monitor drawn as a rectangle in real mm proportions,
-  labelled with its physical size and `px/mm` density, colour-coded, with the
+  labelled with its EDID description ("Dell U2720Q") when it has one — the
+  Hyprland port name (`DP-9`) alongside it, since that's what config keywords
+  actually key on — falling back to the port name alone otherwise. Handy for
+  telling panels apart while setting up hardware you don't recognise yet.
+  Physical size and `px/mm` density are labelled too, colour-coded, with the
   live cursor position overlaid as a dot (from `cursor.mm` in the JSON dump).
   Scroll to zoom, drag empty space to pan, drag a monitor to move it.
+- **Environment name** — a free-text field above the monitor list, purely
+  cosmetic (saved as a `# environment: ...` comment in the layout file, never
+  seen by Hyprlang) for telling apart the layout files from different desks.
+  Shown in the window title.
 - **Snapping** — dragging a monitor snaps its edges and centre-lines to any
   other monitor's edges/centre-lines within ~10 screen px, with a guide line
   while it's active. Off by construction once you're outside that radius —

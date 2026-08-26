@@ -35,7 +35,7 @@ class MonitorRow(Gtk.ListBoxRow):
         self.set_child(box)
 
     def update(self, m) -> None:
-        self.title.set_label(m.name)
+        self.title.set_label(m.display_name if not m.description else f"{m.display_name}  ({m.name})")
         placed = m.placed_how if not m.placed_anchor else f"{m.placed_how} {m.placed_anchor}"
         self.subtitle.set_label(f"{m.mm_w:.0f}×{m.mm_h:.0f} mm  ·  {m.px_per_mm_x:.2f} px/mm  ·  {placed}")
 
@@ -79,6 +79,19 @@ class MmcursorGuiWindow(Adw.ApplicationWindow):
         split = Adw.OverlaySplitView(sidebar_width_fraction=0.28, max_sidebar_width=340)
 
         sidebar_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+
+        # A purely cosmetic label for "which desk is this" — saved as a
+        # comment in mmcursor-layout.conf, so it round-trips across restarts
+        # without meaning anything to Hyprlang or the plugin.
+        self.env_entry = Gtk.Entry(
+            placeholder_text="Name this environment",
+            margin_start=12, margin_end=12, margin_top=12, margin_bottom=8,
+        )
+        self._loaded_env_name = writeback.read_environment_name()
+        self.env_entry.set_text(self._loaded_env_name)
+        self.env_entry.connect("changed", self._on_env_name_changed)
+        sidebar_box.append(self.env_entry)
+
         self.status_group = Adw.PreferencesGroup(title="Layout")
         self.status_label = Gtk.Label(xalign=0, wrap=True, margin_start=12, margin_end=12, margin_bottom=8, css_classes=["dim-label", "caption"])
         sidebar_box.append(self.status_label)
@@ -112,8 +125,18 @@ class MmcursorGuiWindow(Adw.ApplicationWindow):
 
         self._state: MmcursorState | None = None
         self._suppress_row_signal = False
+        self._update_title()
         GLib.idle_add(self._poll)
         GLib.timeout_add(_POLL_MS, self._poll)
+
+    def _update_title(self) -> None:
+        name = self.env_entry.get_text().strip()
+        self.set_title(f"mmcursor — {name}" if name else "mmcursor")
+
+    def _on_env_name_changed(self, *_a) -> None:
+        self._update_title()
+        if self.env_entry.get_text().strip() != self._loaded_env_name:
+            self.save_btn.set_sensitive(True)
 
     # -- polling / state -----------------------------------------------------
 
@@ -204,13 +227,15 @@ class MmcursorGuiWindow(Adw.ApplicationWindow):
             self.banner.set_revealed(True)
             return
         self._dirty.clear()
+        self.env_entry.set_text(self._loaded_env_name)  # discard an unsaved rename too
         self.save_btn.set_sensitive(False)
         self._poll()
 
     def _on_save(self, *_a) -> None:
-        if not self._dirty:
+        env_name = self.env_entry.get_text().strip()
+        if not self._dirty and env_name == self._loaded_env_name:
             return
-        path = writeback.save_placements(self._dirty)
+        path = writeback.save_placements(self._dirty, environment_name=env_name)
         conf = Path(GLib.get_home_dir()) / ".config" / "hypr" / "hyprland.conf"
         sourced = writeback.is_sourced_from(conf, path)
         try:
@@ -220,6 +245,7 @@ class MmcursorGuiWindow(Adw.ApplicationWindow):
             self.banner.set_revealed(True)
             return
         self._dirty.clear()
+        self._loaded_env_name = env_name
         self.save_btn.set_sensitive(False)
         if not sourced:
             self.banner.set_title(f"saved to {path} — add `source = {path}` to hyprland.conf so it survives a real restart")
