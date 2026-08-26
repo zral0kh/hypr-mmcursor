@@ -842,6 +842,25 @@ json debugDumpJSON() {
         jm["logical"] = json{{"x", m.logical.x}, {"y", m.logical.y}, {"w", m.logical.w}, {"h", m.logical.h}};
         jm["pxPerMM"] = json{{"x", m.pxPerMMx()}, {"y", m.pxPerMMy()}};
 
+        // EDID identity, not used for anything geometric — purely so a
+        // client (the GUI) can show "Dell U2720Q" instead of "DP-9" when the
+        // user is looking at unfamiliar hardware in a new desk arrangement.
+        // Looked up here rather than carried on pcs::MonitorDesc because
+        // layout_build.* stays Hyprland-free; this is plugin.cpp's job.
+        jm["description"] = "";
+        jm["make"]        = "";
+        jm["model"]       = "";
+        jm["serial"]      = "";
+        for (const auto& hm : State::monitorState()->monitors()) {
+            if (!hm || hm->m_name != m.name || !hm->m_output)
+                continue;
+            jm["description"] = hm->m_output->description;
+            jm["make"]        = hm->m_output->make;
+            jm["model"]       = hm->m_output->model;
+            jm["serial"]      = hm->m_output->serial;
+            break;
+        }
+
         for (const auto& p : g_diag.placements) {
             if (p.name != m.name)
                 continue;
