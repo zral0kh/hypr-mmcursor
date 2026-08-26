@@ -237,7 +237,22 @@ class MmcursorGuiWindow(Adw.ApplicationWindow):
             return
         path = writeback.save_placements(self._dirty, environment_name=env_name)
         conf = Path(GLib.get_home_dir()) / ".config" / "hypr" / "hyprland.conf"
-        sourced = writeback.is_sourced_from(conf, path)
+
+        # Check BEFORE reloading, not after: a reload always drops every live
+        # preview override (config.preReload clears them), and if the file we
+        # just wrote isn't actually sourced, nothing replaces what it drops —
+        # the arrangement you just built visibly reverts to fully-derived,
+        # which reads as "Apply reset my layout" even though, technically,
+        # nothing was ever persisted for it to revert *from*. Skip the reload
+        # in that case so the live preview survives until the wiring is fixed.
+        if not writeback.is_sourced_from(conf, path):
+            self.banner.set_title(f"saved to {path}, but it isn't sourced from hyprland.conf yet — add `source = {path}` and reload, or the layout stays only a live preview")
+            self.banner.set_revealed(True)
+            self._dirty.clear()
+            self._loaded_env_name = env_name
+            self.save_btn.set_sensitive(False)
+            return
+
         try:
             reload_config()
         except HyprctlError as exc:
@@ -247,9 +262,6 @@ class MmcursorGuiWindow(Adw.ApplicationWindow):
         self._dirty.clear()
         self._loaded_env_name = env_name
         self.save_btn.set_sensitive(False)
-        if not sourced:
-            self.banner.set_title(f"saved to {path} — add `source = {path}` to hyprland.conf so it survives a real restart")
-            self.banner.set_revealed(True)
         self._poll()
 
     def _on_close_request(self, *_a) -> bool:

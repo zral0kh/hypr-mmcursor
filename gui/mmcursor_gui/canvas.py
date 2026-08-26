@@ -431,6 +431,23 @@ class MonitorCanvas(Gtk.DrawingArea):
         m = self._state.monitor(name) if self._state else None
         self._drag_start_mm = self._rect_for(m)[:2] if m else (0.0, 0.0)
 
+        # Pin every OTHER monitor at its current position before this one
+        # moves. Without this, a monitor with no placement of its own that's
+        # anchored to whichever one we're about to drag — the common case in
+        # a simple two-monitor desk, where the satellite is "right-of" the
+        # one you just grabbed — gets re-derived relative to wherever this
+        # drag ends up, and visibly drags along with it. That's the plugin's
+        # relation model working as designed, just not what a direct-
+        # manipulation UI should look like. A pin is a live override like any
+        # drag preview: never written to disk unless that monitor is itself
+        # dragged, so an untouched monitor keeps its real relational
+        # placement in the saved config.
+        if self._state and callable(self.on_preview):
+            for other in self._state.monitors:
+                if other.name != name:
+                    ox, oy = self._rect_for(other)[:2]
+                    self.on_preview(other.name, ox, oy)
+
     def _on_drag_update(self, _g, dx: float, dy: float) -> None:
         if self._panning:
             ox, oy = self._pan_start
@@ -462,10 +479,48 @@ class MonitorCanvas(Gtk.DrawingArea):
         name = self._dragging
         self._dragging = None
         self._guides = []
-        if name and name in self._overlay and callable(self.on_committed):
+        if name and name in self._overlay and self._state:
             x, y = self._overlay[name]
-            self.on_committed(name, x, y)
+            m = self._state.monitor(name)
+            if m:
+                x, y = self._resolve_overlaps(name, x, y, m.mm_w, m.mm_h)
+                self._overlay[name] = (x, y)
+            if callable(self.on_committed):
+                self.on_committed(name, x, y)
         self.queue_draw()
+
+    def _resolve_overlaps(self, name: str, x: float, y: float, w: float, h: float) -> tuple[float, float]:
+        """Called once, on release: guarantee the position about to be
+        committed doesn't overlap anything, before it ever reaches the
+        plugin. `_snap()` during the drag only catches near-misses within a
+        screen-pixel threshold; a monitor dropped well inside another one
+        needs an actual push, or the plugin hard-refuses the whole layout
+        (mmcursor and Hyprland stay up, but cursor motion goes stock —
+        "it breaks" from the outside). Each pass pushes out of one
+        overlapping neighbour along whichever axis needs the smaller nudge,
+        landing flush against that edge — which is itself a clean snap, not
+        just a rescue. Repeated for chains: pushing clear of one monitor can
+        land on top of another.
+        """
+        if not self._state:
+            return x, y
+        for _ in range(len(self._state.monitors)):
+            moved = False
+            for o in self._state.monitors:
+                if o.name == name:
+                    continue
+                ox, oy, ow, oh = self._rect_for(o)
+                if x < ox + ow and ox < x + w and y < oy + oh and oy < y + h:
+                    overlap_x = min(x + w, ox + ow) - max(x, ox)
+                    overlap_y = min(y + h, oy + oh) - max(y, oy)
+                    if overlap_x < overlap_y:
+                        x = ox - w if x < ox else ox + ow
+                    else:
+                        y = oy - h if y < oy else oy + oh
+                    moved = True
+            if not moved:
+                break
+        return x, y
 
     def _on_scroll(self, _c, _dx: float, dy: float) -> bool:
         factor = 1.1 if dy < 0 else (1 / 1.1 if dy > 0 else 1.0)

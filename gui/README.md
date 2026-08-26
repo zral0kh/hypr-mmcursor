@@ -82,7 +82,19 @@ next `omarchy update`. The keybinding above is the supported equivalent.
 - **Snapping** — dragging a monitor snaps its edges and centre-lines to any
   other monitor's edges/centre-lines within ~10 screen px, with a guide line
   while it's active. Off by construction once you're outside that radius —
-  there's no modifier to fight.
+  there's no modifier to fight. On release, a second pass guarantees the
+  dropped position doesn't overlap anything else — pushed out along whichever
+  axis needs the smaller nudge, landing flush against that edge — since a
+  raw overlapping drop makes the plugin hard-refuse the whole layout.
+- **Dragging pins everyone else first.** The moment you grab a monitor, every
+  other monitor gets a live "stay exactly here" override before the drag
+  moves anything. Without this, a monitor with no placement of its own that's
+  anchored to whichever one you just grabbed — the satellite in a simple
+  two-monitor desk, say — gets re-derived relative to wherever you drop it,
+  and visibly drags along: correct plugin behaviour (relations track their
+  anchor), surprising direct-manipulation UX. The pins are live-only, so an
+  untouched monitor still keeps its real relational placement in the saved
+  config — only monitors you actually drag end up in the dirty set.
 - **Nudge arrows** — every edge that's free to move gets a small outward
   arrow. Clicking one opens a text field prefilled with the current
   coordinate and the operator that arrow implies (up: `− `, down: `+ `,
@@ -111,6 +123,13 @@ next `omarchy update`. The keybinding above is the supported equivalent.
   ```
   source = ~/.config/hypr/mmcursor-layout.conf
   ```
+
+  If that line isn't there yet, Apply writes the file but **skips the
+  reload** and warns instead of running it: a reload always drops every live
+  preview override, and if the file isn't sourced nothing replaces what it
+  drops — the arrangement you just built would visibly revert to fully
+  derived, which reads as "Apply reset my layout" even though nothing was
+  ever actually persisted for it to revert from.
 
 - **Discard (↺)** — `hyprctl reload`, dropping any unsaved live overrides and
   going back to whatever hyprland.conf currently says.
