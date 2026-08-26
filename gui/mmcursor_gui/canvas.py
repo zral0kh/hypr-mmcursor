@@ -9,7 +9,6 @@ and then re-confirmed from the next poll.
 from __future__ import annotations
 
 import re
-import time
 
 import gi
 
@@ -43,7 +42,6 @@ _PALETTE = [
 _SNAP_PX = 10.0          # snap catch radius, screen px
 _MIN_SCALE = 0.02
 _MAX_SCALE = 4.0
-_PREVIEW_INTERVAL = 1.0 / 25.0  # throttle for the live hyprctl place() calls
 
 _ARROW_OFFSET = 24.0     # screen px from the edge to the arrow's centre
 _ARROW_HIT_R = 13.0      # click radius, screen px
@@ -107,7 +105,6 @@ class MonitorCanvas(Gtk.DrawingArea):
         self._dragging: str | None = None
         self._panning = False
         self._guides: list[tuple[str, float]] = []  # ("v"|"h", mm coordinate)
-        self._last_preview_t = 0.0
 
         self._scale = 1.0            # screen px per mm
         self._origin_mm = (0.0, 0.0)  # world mm point at the canvas's top-left
@@ -431,24 +428,16 @@ class MonitorCanvas(Gtk.DrawingArea):
         m = self._state.monitor(name) if self._state else None
         self._drag_start_mm = self._rect_for(m)[:2] if m else (0.0, 0.0)
 
-        # Pin every OTHER monitor at its current position before this one
-        # moves. Without this, a monitor with no placement of its own that's
-        # anchored to whichever one we're about to drag — the common case in
-        # a simple two-monitor desk, where the satellite is "right-of" the
-        # one you just grabbed — gets re-derived relative to wherever this
-        # drag ends up, and visibly drags along with it. That's the plugin's
-        # relation model working as designed, just not what a direct-
-        # manipulation UI should look like. A pin is a live override like any
-        # drag preview: never written to disk unless that monitor is itself
-        # dragged, so an untouched monitor keeps its real relational
-        # placement in the saved config.
-        if self._state and callable(self.on_preview):
-            for other in self._state.monitors:
-                if other.name != name:
-                    ox, oy = self._rect_for(other)[:2]
-                    self.on_preview(other.name, ox, oy)
-
     def _on_drag_update(self, _g, dx: float, dy: float) -> None:
+        # Purely local while the mouse is held: no hyprctl calls at all here.
+        # Nudging the plugin on every pointer-move used to mean every drag
+        # that swept across another monitor's rect hit the plugin's overlap
+        # refusal mid-gesture — a real rebuild, with a real (if momentary)
+        # "no layout" state, dozens of times over the course of one drag.
+        # There is nothing to preview from the server for: `_snap()` is a
+        # pure function of the last-polled state plus the pointer, so the
+        # canvas can show exactly where a release would land without asking
+        # the plugin anything until it actually happens.
         if self._panning:
             ox, oy = self._pan_start
             self._origin_mm = (ox - dx / self._scale, oy - dy / self._scale)
@@ -467,11 +456,6 @@ class MonitorCanvas(Gtk.DrawingArea):
         self._guides = guides
         self.queue_draw()
 
-        now = time.monotonic()
-        if now - self._last_preview_t >= _PREVIEW_INTERVAL and callable(self.on_preview):
-            self._last_preview_t = now
-            self.on_preview(self._dragging, wx, wy)
-
     def _on_drag_end(self, _g, dx: float, dy: float) -> None:
         if self._panning:
             self._panning = False
@@ -485,6 +469,24 @@ class MonitorCanvas(Gtk.DrawingArea):
             if m:
                 x, y = self._resolve_overlaps(name, x, y, m.mm_w, m.mm_h)
                 self._overlay[name] = (x, y)
+
+            # Pin every OTHER monitor at its current position, THEN commit
+            # this one — both as a single batch, right now, not spread over
+            # the drag. Without pinning, a monitor with no placement of its
+            # own that's anchored to whichever one we just moved — the
+            # satellite in a simple two-monitor desk, say — re-derives
+            # relative to this one's new position and visibly jumps too:
+            # correct plugin behaviour (relations track their anchor),
+            # surprising direct-manipulation UX. A pin is a live override
+            # like the commit below: never written to disk unless that
+            # monitor is itself dragged, so an untouched monitor keeps its
+            # real relational placement in the saved config.
+            if callable(self.on_preview):
+                for other in self._state.monitors:
+                    if other.name != name:
+                        ox, oy = self._rect_for(other)[:2]
+                        self.on_preview(other.name, ox, oy)
+
             if callable(self.on_committed):
                 self.on_committed(name, x, y)
         self.queue_draw()

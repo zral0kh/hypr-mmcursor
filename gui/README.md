@@ -86,15 +86,6 @@ next `omarchy update`. The keybinding above is the supported equivalent.
   dropped position doesn't overlap anything else — pushed out along whichever
   axis needs the smaller nudge, landing flush against that edge — since a
   raw overlapping drop makes the plugin hard-refuse the whole layout.
-- **Dragging pins everyone else first.** The moment you grab a monitor, every
-  other monitor gets a live "stay exactly here" override before the drag
-  moves anything. Without this, a monitor with no placement of its own that's
-  anchored to whichever one you just grabbed — the satellite in a simple
-  two-monitor desk, say — gets re-derived relative to wherever you drop it,
-  and visibly drags along: correct plugin behaviour (relations track their
-  anchor), surprising direct-manipulation UX. The pins are live-only, so an
-  untouched monitor still keeps its real relational placement in the saved
-  config — only monitors you actually drag end up in the dirty set.
 - **Nudge arrows** — every edge that's free to move gets a small outward
   arrow. Clicking one opens a text field prefilled with the current
   coordinate and the operator that arrow implies (up: `− `, down: `+ `,
@@ -104,21 +95,38 @@ next `omarchy update`. The keybinding above is the supported equivalent.
   since gaps between monitors are never allowed, that whole axis is fixed,
   not just the touching edge — e.g. a monitor sandwiched between two others
   gets no left/right arrows at all, only up/down.
-- **Live preview** — drags call `hyprctl mmcursor place` (throttled to ~25Hz)
-  so what you see updating is the plugin's actual rebuilt layout, not a local
-  guess. Nothing is written to disk yet: hyprland.conf is untouched, and the
-  overrides vanish on the next config reload if you never hit Apply.
+- **Commit on release, not mid-drag.** While a monitor is held, the canvas is
+  purely local — no `hyprctl` calls at all. `_snap()` is a pure function of
+  the last-polled state plus the pointer, so it can show exactly where a
+  release would land without asking the plugin anything. This isn't just a
+  perf choice: nudging the plugin on every pointer-move meant any drag that
+  swept across another monitor's rect hit the plugin's overlap refusal
+  mid-gesture, over and over, for the whole crossing. On release, two things
+  happen together, once: the dropped position is resolved (snap, then pushed
+  clear of any overlap), and every *other* monitor is pinned at its current
+  position — a live-only override, like the commit itself, so a monitor with
+  no placement of its own that's anchored to the one you just moved doesn't
+  visibly follow it. Only the monitor you actually dragged ends up in the
+  dirty set; pinned monitors keep their real relational placement in the
+  saved config.
 - **Sidebar** — one row per monitor (mm size, density, *how* it was placed —
   root / derived / an explicit relation / a drag), plus rebuild/deferred/
   refused counters and any active warnings, so a bad layout is diagnosable
   without switching to a terminal.
-- **Apply & Reload** — writes every monitor you actually dragged this session
-  to `~/.config/hypr/mmcursor-layout.conf` as an absolute `mmcursor-place`
-  line, then runs `hyprctl reload`. Monitors you didn't touch are left alone —
-  dragging one panel doesn't freeze everyone else's derived/relational
-  placement. This file is fully owned by the tool; hand edits to *other*
-  monitors' lines in it survive a save. The first time, add this to
-  `hyprland.conf` yourself (the tool warns if it looks missing):
+- **Apply & Reload** — a *second*, separate step from dragging, and it does
+  something dragging fundamentally can't: dragging only ever calls
+  `hyprctl mmcursor place`, a **live, in-memory-only** override — the plugin
+  says so itself (`hyprctl mmcursor` prints "live overrides are active (not
+  persisted)" the whole time). It vanishes on the next config reload, monitor
+  hotplug, or reboot, no matter how good it looks on screen. Apply & Reload
+  is the only thing that writes what you arranged to disk: every monitor you
+  actually dragged this session, to `~/.config/hypr/mmcursor-layout.conf` as
+  an absolute `mmcursor-place` line, then `hyprctl reload` to prove it
+  round-trips through the real config path rather than trusting the preview.
+  Monitors you didn't touch are left alone — dragging one panel doesn't
+  freeze everyone else's derived/relational placement. This file is fully
+  owned by the tool; hand edits to *other* monitors' lines in it survive a
+  save. The first time, add this to `hyprland.conf` yourself:
 
   ```
   source = ~/.config/hypr/mmcursor-layout.conf
