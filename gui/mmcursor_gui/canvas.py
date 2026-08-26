@@ -42,6 +42,8 @@ _PALETTE = [
 _SNAP_PX = 10.0          # snap catch radius, screen px
 _MIN_SCALE = 0.02
 _MAX_SCALE = 4.0
+_MIN_TOUCH_OVERLAP_MM = 10.0  # a "touching" seam needs a real cross-section,
+                              # not a single point at a shared corner
 
 _ARROW_OFFSET = 24.0     # screen px from the edge to the arrow's centre
 _ARROW_HIT_R = 13.0      # click radius, screen px
@@ -239,6 +241,38 @@ class MonitorCanvas(Gtk.DrawingArea):
                 return True
         return False
 
+    def _touch_range(self, near: float, far_extent: float, my_extent: float) -> tuple[float, float]:
+        """The valid range for a free-axis coordinate such that this rect
+        (size `my_extent` along this axis) shares at least
+        `_MIN_TOUCH_OVERLAP_MM` of real overlap with the other one (spanning
+        [near, near+far_extent]) — not just a single shared boundary point,
+        which isn't a seam anything can actually be adjacent along. Shrinks
+        the minimum for a pair small enough that it can't be met, rather
+        than ever returning an inverted (lo > hi) range."""
+        lo, hi = near - my_extent, near + far_extent
+        min_overlap = min(_MIN_TOUCH_OVERLAP_MM, (hi - lo) / 2.0)
+        return lo + min_overlap, hi - min_overlap
+
+    def _snap_scalar(self, raw: float, targets: list[float], my_offsets: list[float], threshold: float) -> tuple[float, float | None]:
+        """Nudge `raw` so that raw+offset lands exactly on the closest target
+        within `threshold`, trying every (target, offset) pair — e.g. this
+        rect's centre against the other's centre, or its far edge against
+        the other's near edge. Returns (value, the target it snapped to, or
+        None). This is the free-axis counterpart to the hard touching
+        constraint on the fixed axis: without it, "flush against the right
+        edge" was the only alignment a drag could ever produce — no more
+        centring, no more top/bottom flush, since the free axis was just
+        left wherever the raw pointer happened to be."""
+        best_delta, best_target = None, None
+        for t in targets:
+            for off in my_offsets:
+                d = t - (raw + off)
+                if abs(d) <= threshold and (best_delta is None or abs(d) < abs(best_delta)):
+                    best_delta, best_target = d, t
+        if best_delta is None:
+            return raw, None
+        return raw + best_delta, best_target
+
     def _project_to_touching(self, name: str, raw_x: float, raw_y: float, w: float, h: float) -> tuple[float, float, list[tuple[str, float]]]:
         if not self._state:
             return raw_x, raw_y, []
@@ -246,34 +280,54 @@ class MonitorCanvas(Gtk.DrawingArea):
         if not others:
             return raw_x, raw_y, []  # nothing to be relative to; free to go anywhere
 
-        best_xy: tuple[float, float] | None = None
-        best_guide: tuple[str, float] | None = None
-        best_cost = None
+        threshold = _SNAP_PX / self._scale
+        best: tuple[float, float, float, list[tuple[str, float]]] | None = None  # (cost, x, y, guides)
         for o in others:
             ox, oy, ow, oh = self._rect_for(o)
             gap = self._state.gap_between(name, o.name)
-            # Each candidate holds the OTHER axis at wherever the pointer
-            # actually is, and fixes the touching axis exactly, at the
-            # correct seam gap. Only the fixed axis contributes to cost:
-            # that's the only axis being pulled away from the raw drop.
-            candidates = [
-                (ox + ow + gap, raw_y, "v", ox + ow + gap, abs(ox + ow + gap - raw_x)),   # flush on o's right
-                (ox - gap - w,  raw_y, "v", ox - gap,       abs(ox - gap - w - raw_x)),   # flush on o's left
-                (raw_x, oy + oh + gap, "h", oy + oh + gap, abs(oy + oh + gap - raw_y)),   # flush below o
-                (raw_x, oy - gap - h,  "h", oy - gap,       abs(oy - gap - h - raw_y)),   # flush above o
-            ]
-            for cx, cy, kind, guide_coord, cost in candidates:
-                if self._overlaps_any(name, cx, cy, w, h, others):
-                    continue
-                if best_cost is None or cost < best_cost:
-                    best_cost, best_xy, best_guide = cost, (cx, cy), (kind, guide_coord)
 
-        if best_xy is None:
+            # The free axis is clamped to wherever the two rects can still
+            # genuinely overlap — otherwise "touching" only shares a
+            # coordinate along the edge's infinite extension, not an actual
+            # adjacent seam: a monitor could sit level with another one's
+            # edge while being nowhere near it, floating off along the
+            # sideline past its actual extent. Within that valid range, also
+            # offer a soft snap to the other monitor's near/centre/far mark
+            # on that axis, so flush-top, centred and flush-bottom stay
+            # reachable rather than only "wherever the pointer is".
+            cy_lo, cy_hi = self._touch_range(oy, oh, h)
+            cy = max(cy_lo, min(raw_y, cy_hi))
+            cy, cy_target = self._snap_scalar(cy, [oy, oy + oh, oy + oh / 2.0], [0.0, h / 2.0, h], threshold)
+            cx_lo, cx_hi = self._touch_range(ox, ow, w)
+            cx = max(cx_lo, min(raw_x, cx_hi))
+            cx, cx_target = self._snap_scalar(cx, [ox, ox + ow, ox + ow / 2.0], [0.0, w / 2.0, w], threshold)
+
+            candidates = [
+                (ox + ow + gap, cy, "v", ox + ow + gap, [("h", cy_target)] if cy_target is not None else []),  # flush on o's right
+                (ox - gap - w,  cy, "v", ox - gap,       [("h", cy_target)] if cy_target is not None else []),  # flush on o's left
+                (cx, oy + oh + gap, "h", oy + oh + gap, [("v", cx_target)] if cx_target is not None else []),  # flush below o
+                (cx, oy - gap - h,  "h", oy - gap,       [("v", cx_target)] if cx_target is not None else []),  # flush above o
+            ]
+            for x, y, kind, guide_coord, extra_guides in candidates:
+                if self._overlaps_any(name, x, y, w, h, others):
+                    continue
+                # Full 2D distance from the raw drop, not just the fixed
+                # axis: a candidate that needed a big clamp on the free axis
+                # (dragging level with a small monitor's edge, far past its
+                # actual height) should lose to a candidate that needed
+                # almost no adjustment at all, even if its fixed-axis jump
+                # alone looks smaller.
+                cost = abs(x - raw_x) + abs(y - raw_y)
+                if best is None or cost < best[0]:
+                    best = (cost, x, y, [(kind, guide_coord)] + extra_guides)
+
+        if best is None:
             # Every touching candidate overlaps a third monitor (a cluttered
             # desk) — fall back to the raw position; _resolve_overlaps at
             # release is still there as a backstop.
             return raw_x, raw_y, []
-        return best_xy[0], best_xy[1], [best_guide]
+        _, x, y, guides = best
+        return x, y, guides
 
     # -- outward nudge arrows -------------------------------------------
 

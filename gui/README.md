@@ -87,10 +87,16 @@ next `omarchy update`. The keybinding above is the supported equivalent.
   monitors (see the nudge-arrow rule below), so the canvas doesn't let you
   drag one apart from the rest either. While you drag, the position is
   continuously projected onto the nearest point where it's exactly flush
-  against *some* other monitor, at the configured gap, with a guide line
-  showing which edge — not just a soft pull within a few pixels near an
-  edge, an actual constraint for the whole drag. You can still slide freely
-  along whichever axis isn't the touching one, and hop to touch a different
+  against *some* other monitor, at the configured gap — not just a soft pull
+  within a few pixels near an edge, an actual constraint for the whole drag.
+  The free axis (whichever one isn't touching) is clamped to a real
+  overlapping range, not just a shared coordinate: level with another
+  monitor's edge but nowhere near its actual extent doesn't count as
+  touching, it's floating off along the edge's sideline. Within that valid
+  range, the free axis still snaps to that monitor's near/centre/far mark
+  when close, so flush-top, centred and flush-bottom stay reachable exactly
+  — with a guide line for whichever edge and alignment are active. You can
+  slide freely elsewhere in that range, and hop to touch a different
   monitor entirely; you just can't let go of contact. Candidates that would
   overlap a third monitor are rejected in favour of the next-closest one, so
   a crowded desk can't produce an invalid drop.
