@@ -108,13 +108,17 @@ class MonitorCanvas(Gtk.DrawingArea):
 
         self._scale = 1.0            # screen px per mm
         self._origin_mm = (0.0, 0.0)  # world mm point at the canvas's top-left
-        self._auto_fit = True
+        self._did_initial_fit = False
         self._last_pointer = (0.0, 0.0)
         self._pan_start = (0.0, 0.0)
         self._drag_start_mm = (0.0, 0.0)
 
         self.set_draw_func(self._draw)
-        self.connect("resize", lambda *_a: self._maybe_fit())
+        # Resizing the WIDGET (the app window) is a reasonable time to
+        # reframe — the available canvas area actually changed. This is
+        # unrelated to set_state(), which does NOT reframe on its own; see
+        # the comment there for why.
+        self.connect("resize", lambda *_a: self._recompute_fit())
 
         drag = Gtk.GestureDrag.new()
         drag.connect("drag-begin", self._on_drag_begin)
@@ -142,7 +146,20 @@ class MonitorCanvas(Gtk.DrawingArea):
         # monitor NOT being dragged should always reflect the server, so a
         # save/reload or an external hotplug is visible immediately.
         self._overlay = {k: v for k, v in self._overlay.items() if k == self._dragging}
-        self._maybe_fit()
+        # Reframe automatically only ONCE — the first time real monitors
+        # show up — and never again on our own. Refitting on every poll
+        # (every ~700ms, so easily mid-drag) meant the scale and pan could
+        # shift out from under a held monitor while you were still dragging
+        # it: _on_drag_update maps pointer motion through the current scale,
+        # so a scale change mid-gesture made the monitor visibly jump. After
+        # the first fit, the SCALE never changes on its own: the Fit button
+        # or scrolling to zoom are the only ways to rescale. The view can
+        # still pan on its own, though — see _keep_in_view() — so a monitor
+        # dragged toward the edge of the canvas stays in frame by following
+        # it, rather than by zooming back out to refit everything.
+        if not self._did_initial_fit and state.monitors:
+            self._recompute_fit()
+            self._did_initial_fit = True
         self.queue_draw()
 
     def selected(self) -> str | None:
@@ -153,7 +170,6 @@ class MonitorCanvas(Gtk.DrawingArea):
         self.queue_draw()
 
     def fit_to_view(self) -> None:
-        self._auto_fit = True
         self._recompute_fit()
         self.queue_draw()
 
@@ -171,10 +187,6 @@ class MonitorCanvas(Gtk.DrawingArea):
             x, y, w, h = self._rect_for(m)
             xs0.append(x); ys0.append(y); xs1.append(x + w); ys1.append(y + h)
         return min(xs0), min(ys0), max(xs1) - min(xs0), max(ys1) - min(ys0)
-
-    def _maybe_fit(self) -> None:
-        if self._auto_fit:
-            self._recompute_fit()
 
     def _recompute_fit(self) -> None:
         w = self.get_width() or 1
@@ -207,41 +219,61 @@ class MonitorCanvas(Gtk.DrawingArea):
                 return m.name
         return None
 
-    # -- snapping --------------------------------------------------------
+    # -- always touching --------------------------------------------------
+    #
+    # mmcursor never allows a gap between monitors (see the nudge-arrow
+    # design: an axis with any neighbour touching it loses its arrows
+    # entirely, precisely because floating apart isn't a state this plugin
+    # models). A monitor drifting free of everything else mid-drag isn't a
+    # preview of a valid layout, so it's not allowed to render as one: the
+    # dragged position is continuously projected onto the nearest point
+    # where it's flush against SOME other monitor, at the configured gap,
+    # for the entire drag — not just checked at release.
 
-    def _snap(self, name: str, x: float, y: float, w: float, h: float) -> tuple[float, float, list[tuple[str, float]]]:
-        if not self._state:
-            return x, y, []
-        threshold = _SNAP_PX / self._scale
-        edges_x: list[float] = []
-        edges_y: list[float] = []
-        for m in self._state.monitors:
-            if m.name == name:
+    def _overlaps_any(self, name: str, x: float, y: float, w: float, h: float, others: list[MonitorState]) -> bool:
+        for o in others:
+            if o.name == name:
                 continue
-            ox, oy, ow, oh = self._rect_for(m)
-            edges_x += [ox, ox + ow, ox + ow / 2.0]
-            edges_y += [oy, oy + oh, oy + oh / 2.0]
+            ox, oy, ow, oh = self._rect_for(o)
+            if x < ox + ow and ox < x + w and y < oy + oh and oy < y + h:
+                return True
+        return False
 
-        guides: list[tuple[str, float]] = []
+    def _project_to_touching(self, name: str, raw_x: float, raw_y: float, w: float, h: float) -> tuple[float, float, list[tuple[str, float]]]:
+        if not self._state:
+            return raw_x, raw_y, []
+        others = [o for o in self._state.monitors if o.name != name]
+        if not others:
+            return raw_x, raw_y, []  # nothing to be relative to; free to go anywhere
 
-        def closest(candidates: list[float], my_values: list[float]) -> tuple[float | None, float | None]:
-            best_delta, best_target = None, None
-            for target in candidates:
-                for mine in my_values:
-                    d = target - mine
-                    if abs(d) <= threshold and (best_delta is None or abs(d) < abs(best_delta)):
-                        best_delta, best_target = d, target
-            return best_delta, best_target
+        best_xy: tuple[float, float] | None = None
+        best_guide: tuple[str, float] | None = None
+        best_cost = None
+        for o in others:
+            ox, oy, ow, oh = self._rect_for(o)
+            gap = self._state.gap_between(name, o.name)
+            # Each candidate holds the OTHER axis at wherever the pointer
+            # actually is, and fixes the touching axis exactly, at the
+            # correct seam gap. Only the fixed axis contributes to cost:
+            # that's the only axis being pulled away from the raw drop.
+            candidates = [
+                (ox + ow + gap, raw_y, "v", ox + ow + gap, abs(ox + ow + gap - raw_x)),   # flush on o's right
+                (ox - gap - w,  raw_y, "v", ox - gap,       abs(ox - gap - w - raw_x)),   # flush on o's left
+                (raw_x, oy + oh + gap, "h", oy + oh + gap, abs(oy + oh + gap - raw_y)),   # flush below o
+                (raw_x, oy - gap - h,  "h", oy - gap,       abs(oy - gap - h - raw_y)),   # flush above o
+            ]
+            for cx, cy, kind, guide_coord, cost in candidates:
+                if self._overlaps_any(name, cx, cy, w, h, others):
+                    continue
+                if best_cost is None or cost < best_cost:
+                    best_cost, best_xy, best_guide = cost, (cx, cy), (kind, guide_coord)
 
-        dx, target_x = closest(edges_x, [x, x + w / 2.0, x + w])
-        dy, target_y = closest(edges_y, [y, y + h / 2.0, y + h])
-        if dx is not None:
-            x += dx
-            guides.append(("v", target_x))
-        if dy is not None:
-            y += dy
-            guides.append(("h", target_y))
-        return x, y, guides
+        if best_xy is None:
+            # Every touching candidate overlaps a third monitor (a cluttered
+            # desk) — fall back to the raw position; _resolve_overlaps at
+            # release is still there as a backstop.
+            return raw_x, raw_y, []
+        return best_xy[0], best_xy[1], [best_guide]
 
     # -- outward nudge arrows -------------------------------------------
 
@@ -434,14 +466,13 @@ class MonitorCanvas(Gtk.DrawingArea):
         # that swept across another monitor's rect hit the plugin's overlap
         # refusal mid-gesture — a real rebuild, with a real (if momentary)
         # "no layout" state, dozens of times over the course of one drag.
-        # There is nothing to preview from the server for: `_snap()` is a
-        # pure function of the last-polled state plus the pointer, so the
-        # canvas can show exactly where a release would land without asking
-        # the plugin anything until it actually happens.
+        # There is nothing to preview from the server for: `_project_to_
+        # touching()` is a pure function of the last-polled state plus the
+        # pointer, so the canvas can show exactly where a release would land
+        # without asking the plugin anything until it actually happens.
         if self._panning:
             ox, oy = self._pan_start
             self._origin_mm = (ox - dx / self._scale, oy - dy / self._scale)
-            self._auto_fit = False
             self.queue_draw()
             return
         if not self._dragging or not self._state:
@@ -451,10 +482,32 @@ class MonitorCanvas(Gtk.DrawingArea):
             return
         wx = self._drag_start_mm[0] + dx / self._scale
         wy = self._drag_start_mm[1] + dy / self._scale
-        wx, wy, guides = self._snap(self._dragging, wx, wy, m.mm_w, m.mm_h)
+        wx, wy, guides = self._project_to_touching(self._dragging, wx, wy, m.mm_w, m.mm_h)
         self._overlay[self._dragging] = (wx, wy)
         self._guides = guides
+        self._keep_in_view(wx, wy, m.mm_w, m.mm_h)
         self.queue_draw()
+
+    def _keep_in_view(self, x: float, y: float, w: float, h: float) -> None:
+        """Pan — never rescale — so the monitor being dragged stays visible
+        as it moves. This is the alternative to reframing on every state
+        update: the view doesn't resize to fit the whole desk, it just
+        follows whatever you're actually holding."""
+        pad = 32.0
+        width = self.get_width() or 1
+        height = self.get_height() or 1
+        sx0, sy0 = self._world_to_screen(x, y)
+        sx1, sy1 = self._world_to_screen(x + w, y + h)
+        ox, oy = self._origin_mm
+        if sx0 < pad:
+            ox += (sx0 - pad) / self._scale
+        elif sx1 > width - pad:
+            ox += (sx1 - (width - pad)) / self._scale
+        if sy0 < pad:
+            oy += (sy0 - pad) / self._scale
+        elif sy1 > height - pad:
+            oy += (sy1 - (height - pad)) / self._scale
+        self._origin_mm = (ox, oy)
 
     def _on_drag_end(self, _g, dx: float, dy: float) -> None:
         if self._panning:
@@ -492,17 +545,16 @@ class MonitorCanvas(Gtk.DrawingArea):
         self.queue_draw()
 
     def _resolve_overlaps(self, name: str, x: float, y: float, w: float, h: float) -> tuple[float, float]:
-        """Called once, on release: guarantee the position about to be
-        committed doesn't overlap anything, before it ever reaches the
-        plugin. `_snap()` during the drag only catches near-misses within a
-        screen-pixel threshold; a monitor dropped well inside another one
-        needs an actual push, or the plugin hard-refuses the whole layout
-        (mmcursor and Hyprland stay up, but cursor motion goes stock —
-        "it breaks" from the outside). Each pass pushes out of one
-        overlapping neighbour along whichever axis needs the smaller nudge,
-        landing flush against that edge — which is itself a clean snap, not
-        just a rescue. Repeated for chains: pushing clear of one monitor can
-        land on top of another.
+        """Called once, on release, as a backstop: `_project_to_touching()`
+        already guarantees no overlap on every drag tick, EXCEPT the one
+        fallback case where every touching candidate it tried overlapped a
+        third monitor and it gave up and returned the raw position. Catch
+        that here before it ever reaches the plugin (mmcursor and Hyprland
+        stay up on an overlap, but hard-refuses the whole layout — cursor
+        motion goes stock, "it breaks" from the outside). Each pass pushes
+        out of one overlapping neighbour along whichever axis needs the
+        smaller nudge, landing flush against that edge. Repeated for chains:
+        pushing clear of one monitor can land on top of another.
         """
         if not self._state:
             return x, y
@@ -534,7 +586,6 @@ class MonitorCanvas(Gtk.DrawingArea):
         after = self._screen_to_world(px, py)
         ox, oy = self._origin_mm
         self._origin_mm = (ox + (before[0] - after[0]), oy + (before[1] - after[1]))
-        self._auto_fit = False
         self.queue_draw()
         return True
 

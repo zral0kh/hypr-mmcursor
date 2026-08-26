@@ -74,18 +74,26 @@ next `omarchy update`. The keybinding above is the supported equivalent.
   telling panels apart while setting up hardware you don't recognise yet.
   Physical size and `px/mm` density are labelled too, colour-coded, with the
   live cursor position overlaid as a dot (from `cursor.mm` in the JSON dump).
-  Scroll to zoom, drag empty space to pan, drag a monitor to move it.
+  Scroll to zoom, drag empty space to pan, drag a monitor to move it. The
+  view only reframes itself once, the first time monitors show up (or when
+  you click Fit) — it never rescales on its own after that, including while
+  you're dragging. It still pans to keep whatever you're dragging in frame,
+  though; see "Commit on release" below.
 - **Environment name** — a free-text field above the monitor list, purely
   cosmetic (saved as a `# environment: ...` comment in the layout file, never
   seen by Hyprlang) for telling apart the layout files from different desks.
   Shown in the window title.
-- **Snapping** — dragging a monitor snaps its edges and centre-lines to any
-  other monitor's edges/centre-lines within ~10 screen px, with a guide line
-  while it's active. Off by construction once you're outside that radius —
-  there's no modifier to fight. On release, a second pass guarantees the
-  dropped position doesn't overlap anything else — pushed out along whichever
-  axis needs the smaller nudge, landing flush against that edge — since a
-  raw overlapping drop makes the plugin hard-refuse the whole layout.
+- **Always touching, never floating.** mmcursor doesn't model a gap between
+  monitors (see the nudge-arrow rule below), so the canvas doesn't let you
+  drag one apart from the rest either. While you drag, the position is
+  continuously projected onto the nearest point where it's exactly flush
+  against *some* other monitor, at the configured gap, with a guide line
+  showing which edge — not just a soft pull within a few pixels near an
+  edge, an actual constraint for the whole drag. You can still slide freely
+  along whichever axis isn't the touching one, and hop to touch a different
+  monitor entirely; you just can't let go of contact. Candidates that would
+  overlap a third monitor are rejected in favour of the next-closest one, so
+  a crowded desk can't produce an invalid drop.
 - **Nudge arrows** — every edge that's free to move gets a small outward
   arrow. Clicking one opens a text field prefilled with the current
   coordinate and the operator that arrow implies (up: `− `, down: `+ `,
@@ -96,19 +104,20 @@ next `omarchy update`. The keybinding above is the supported equivalent.
   not just the touching edge — e.g. a monitor sandwiched between two others
   gets no left/right arrows at all, only up/down.
 - **Commit on release, not mid-drag.** While a monitor is held, the canvas is
-  purely local — no `hyprctl` calls at all. `_snap()` is a pure function of
-  the last-polled state plus the pointer, so it can show exactly where a
-  release would land without asking the plugin anything. This isn't just a
-  perf choice: nudging the plugin on every pointer-move meant any drag that
-  swept across another monitor's rect hit the plugin's overlap refusal
-  mid-gesture, over and over, for the whole crossing. On release, two things
-  happen together, once: the dropped position is resolved (snap, then pushed
-  clear of any overlap), and every *other* monitor is pinned at its current
-  position — a live-only override, like the commit itself, so a monitor with
-  no placement of its own that's anchored to the one you just moved doesn't
-  visibly follow it. Only the monitor you actually dragged ends up in the
-  dirty set; pinned monitors keep their real relational placement in the
-  saved config.
+  purely local — no `hyprctl` calls at all. `_project_to_touching()` is a
+  pure function of the last-polled state plus the pointer, so it can show
+  exactly where a release would land without asking the plugin anything.
+  This isn't just a perf choice: nudging the plugin on every pointer-move
+  meant any drag that swept across another monitor's rect hit the plugin's
+  overlap refusal mid-gesture, over and over, for the whole crossing. On
+  release, two things happen together, once: the dropped position is
+  resolved (projected onto the touching constraint, then a backstop pass
+  guards against the rare case where every candidate overlapped a third
+  monitor), and every *other* monitor is pinned at its current position — a
+  live-only override, like the commit itself, so a monitor with no placement
+  of its own that's anchored to the one you just moved doesn't visibly
+  follow it. Only the monitor you actually dragged ends up in the dirty set;
+  pinned monitors keep their real relational placement in the saved config.
 - **Sidebar** — one row per monitor (mm size, density, *how* it was placed —
   root / derived / an explicit relation / a drag), plus rebuild/deferred/
   refused counters and any active warnings, so a bad layout is diagnosable
