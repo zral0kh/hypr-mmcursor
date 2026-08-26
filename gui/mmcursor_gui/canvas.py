@@ -42,12 +42,18 @@ _PALETTE = [
 _SNAP_PX = 10.0          # snap catch radius, screen px
 _MIN_SCALE = 0.02
 _MAX_SCALE = 4.0
-_MIN_TOUCH_OVERLAP_MM = 10.0  # a "touching" seam needs a real cross-section,
-                              # not a single point at a shared corner
-
 _ARROW_OFFSET = 24.0     # screen px from the edge to the arrow's centre
 _ARROW_HIT_R = 13.0      # click radius, screen px
-_TOUCH_EPS_MM = 0.5      # tolerance for "this edge is touching a neighbour"
+
+# Two thresholds for one shared notion of "touching" (_touch_candidates()),
+# used for two different purposes: MIN_OVERLAP is UX policy for a drag that's
+# actively CREATING a seam — don't let it land at a near-zero-overlap corner
+# just because that's technically non-negative. EPS is floating-point/real-
+# world tolerance for DETECTING a seam that (per the server) already exists —
+# a monitor is either touching or it isn't, so this only needs to be "not
+# zero", not a usability minimum.
+_MIN_TOUCH_OVERLAP_MM = 10.0
+_TOUCH_EPS_MM = 0.5
 
 _ABS_EXPR = re.compile(r"^\s*([+-]?\d+(?:\.\d+)?)\s*$")
 _ADD_SUB_EXPR = re.compile(r"^\s*([+-]?\d+(?:\.\d+)?)\s*([+-])\s*(\d+(?:\.\d+)?)\s*$")
@@ -241,6 +247,28 @@ class MonitorCanvas(Gtk.DrawingArea):
                 return True
         return False
 
+    def _touch_candidates(self, name: str, w: float, h: float, o: MonitorState) -> list[tuple[str, float]]:
+        """The (axis, coordinate) pairs where a rect of size w x h, named
+        `name`, would sit exactly flush against `o`, at the configured gap:
+        left edge on o's right, right edge on o's left, top edge below o,
+        bottom edge above o. The single definition of what "touching o"
+        means on each axis — shared by _project_to_touching(), which builds
+        a drag position from these, and _free_axes(), which checks whether
+        a monitor's ACTUAL current position already matches one."""
+        ox, oy, ow, oh = self._rect_for(o)
+        gap = self._state.gap_between(name, o.name)
+        return [
+            ("v", ox + ow + gap),  # my left edge, flush on o's right
+            ("v", ox - gap - w),   # my right edge, flush on o's left
+            ("h", oy + oh + gap),  # my top edge, flush below o
+            ("h", oy - gap - h),   # my bottom edge, flush above o
+        ]
+
+    def _cross_overlap(self, near: float, extent: float, other_near: float, other_extent: float) -> float:
+        """How much [near, near+extent] and [other_near, other_near+other_extent]
+        actually overlap — negative or zero means they don't."""
+        return min(near + extent, other_near + other_extent) - max(near, other_near)
+
     def _touch_range(self, near: float, far_extent: float, my_extent: float) -> tuple[float, float]:
         """The valid range for a free-axis coordinate such that this rect
         (size `my_extent` along this axis) shares at least
@@ -284,17 +312,17 @@ class MonitorCanvas(Gtk.DrawingArea):
         best: tuple[float, float, float, list[tuple[str, float]]] | None = None  # (cost, x, y, guides)
         for o in others:
             ox, oy, ow, oh = self._rect_for(o)
-            gap = self._state.gap_between(name, o.name)
 
-            # The free axis is clamped to wherever the two rects can still
-            # genuinely overlap — otherwise "touching" only shares a
-            # coordinate along the edge's infinite extension, not an actual
-            # adjacent seam: a monitor could sit level with another one's
-            # edge while being nowhere near it, floating off along the
-            # sideline past its actual extent. Within that valid range, also
-            # offer a soft snap to the other monitor's near/centre/far mark
-            # on that axis, so flush-top, centred and flush-bottom stay
-            # reachable rather than only "wherever the pointer is".
+            # The free axis (whichever one a candidate doesn't fix) is
+            # clamped to wherever the two rects can still genuinely overlap
+            # — otherwise "touching" only shares a coordinate along the
+            # edge's infinite extension, not an actual adjacent seam: a
+            # monitor could sit level with another one's edge while being
+            # nowhere near it, floating off along the sideline past its
+            # actual extent. Within that valid range, also offer a soft
+            # snap to the other monitor's near/centre/far mark on that axis,
+            # so flush-top, centred and flush-bottom stay reachable rather
+            # than only "wherever the pointer is".
             cy_lo, cy_hi = self._touch_range(oy, oh, h)
             cy = max(cy_lo, min(raw_y, cy_hi))
             cy, cy_target = self._snap_scalar(cy, [oy, oy + oh, oy + oh / 2.0], [0.0, h / 2.0, h], threshold)
@@ -302,13 +330,10 @@ class MonitorCanvas(Gtk.DrawingArea):
             cx = max(cx_lo, min(raw_x, cx_hi))
             cx, cx_target = self._snap_scalar(cx, [ox, ox + ow, ox + ow / 2.0], [0.0, w / 2.0, w], threshold)
 
-            candidates = [
-                (ox + ow + gap, cy, "v", ox + ow + gap, [("h", cy_target)] if cy_target is not None else []),  # flush on o's right
-                (ox - gap - w,  cy, "v", ox - gap,       [("h", cy_target)] if cy_target is not None else []),  # flush on o's left
-                (cx, oy + oh + gap, "h", oy + oh + gap, [("v", cx_target)] if cx_target is not None else []),  # flush below o
-                (cx, oy - gap - h,  "h", oy - gap,       [("v", cx_target)] if cx_target is not None else []),  # flush above o
-            ]
-            for x, y, kind, guide_coord, extra_guides in candidates:
+            for kind, fixed in self._touch_candidates(name, w, h, o):
+                x, y = (fixed, cy) if kind == "v" else (cx, fixed)
+                extra_guides = ([("h", cy_target)] if cy_target is not None else []) if kind == "v" else \
+                               ([("v", cx_target)] if cx_target is not None else [])
                 if self._overlaps_any(name, x, y, w, h, others):
                     continue
                 # Full 2D distance from the raw drop, not just the fixed
@@ -319,7 +344,7 @@ class MonitorCanvas(Gtk.DrawingArea):
                 # alone looks smaller.
                 cost = abs(x - raw_x) + abs(y - raw_y)
                 if best is None or cost < best[0]:
-                    best = (cost, x, y, [(kind, guide_coord)] + extra_guides)
+                    best = (cost, x, y, [(kind, fixed)] + extra_guides)
 
         if best is None:
             # Every touching candidate overlaps a third monitor (a cluttered
@@ -340,6 +365,11 @@ class MonitorCanvas(Gtk.DrawingArea):
         gap on the touching side or drive straight through the neighbour;
         since gaps between monitors are never allowed, the whole axis is off
         limits, not just the edge that happens to be in contact.
+
+        Uses the exact same _touch_candidates() a drag projects onto, so
+        "is this monitor touching something" has one definition, not two:
+        this checks the monitor's ACTUAL current position against those
+        candidates instead of building a new one from a raw drag position.
         """
         if not self._state:
             return True, True, True, True
@@ -358,13 +388,12 @@ class MonitorCanvas(Gtk.DrawingArea):
             if o.name == name:
                 continue
             ox, oy, ow, oh = self._rect_for(o)
-            gap = self._state.gap_between(name, o.name)
-
-            if min(y + h, oy + oh) - max(y, oy) > _TOUCH_EPS_MM:
-                if abs(ox - (x + w) - gap) < _TOUCH_EPS_MM or abs(x - (ox + ow) - gap) < _TOUCH_EPS_MM:
+            y_overlap = self._cross_overlap(y, h, oy, oh)
+            x_overlap = self._cross_overlap(x, w, ox, ow)
+            for kind, fixed in self._touch_candidates(name, w, h, o):
+                if kind == "v" and y_overlap > _TOUCH_EPS_MM and abs(x - fixed) < _TOUCH_EPS_MM:
                     x_bounded = True
-            if min(x + w, ox + ow) - max(x, ox) > _TOUCH_EPS_MM:
-                if abs(oy - (y + h) - gap) < _TOUCH_EPS_MM or abs(y - (oy + oh) - gap) < _TOUCH_EPS_MM:
+                if kind == "h" and x_overlap > _TOUCH_EPS_MM and abs(y - fixed) < _TOUCH_EPS_MM:
                     y_bounded = True
 
         return not x_bounded, not x_bounded, not y_bounded, not y_bounded
