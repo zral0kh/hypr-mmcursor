@@ -351,3 +351,9 @@ worse than none.
 `TUTORIAL.md` is a guided read of the whole plugin. `ROADMAP.md` has what is
 left plus a reference section of hard-won Hyprland facts. `CLAUDE.md` has the
 rules for working on it.
+
+There's also an optional drag-to-arrange GUI — a separate GTK4/libadwaita
+tool that talks to the plugin only through `hyprctl`, so it stays off this
+branch and out of the plugin's own dependency list. It lives in the `gui/`
+directory on the `gui-tool` branch: `git checkout gui-tool` (or
+`git clone -b gui-tool <this repo's URL>`), then see `gui/README.md`.
